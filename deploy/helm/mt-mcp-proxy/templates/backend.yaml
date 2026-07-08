@@ -1,0 +1,65 @@
+{{- if .Values.backend.managed.enabled }}
+{{- $port := .Values.backend.managed.port | default 8082 }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "mt-mcp-proxy.fullname" . }}-backend
+  labels:
+    {{- include "mt-mcp-proxy.labels" . | nindent 4 }}
+    app.kubernetes.io/component: backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "mt-mcp-proxy.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: backend
+  template:
+    metadata:
+      labels:
+        {{- include "mt-mcp-proxy.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: backend
+    spec:
+      containers:
+        - name: backend
+          image: "{{ .Values.backend.managed.image.repository }}:{{ .Values.backend.managed.image.tag }}"
+          imagePullPolicy: {{ .Values.backend.managed.image.pullPolicy | default "IfNotPresent" }}
+          {{- with .Values.backend.managed.command }}
+          command:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.backend.managed.args }}
+          args:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          ports:
+            - name: mcp
+              containerPort: {{ $port }}
+              protocol: TCP
+          {{- with .Values.backend.managed.env }}
+          env:
+            {{- range $k, $v := . }}
+            - name: "{{ $k }}"
+              value: "{{ $v }}"
+            {{- end }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.backend.managed.resources | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "mt-mcp-proxy.fullname" . }}-backend
+  labels:
+    {{- include "mt-mcp-proxy.labels" . | nindent 4 }}
+    app.kubernetes.io/component: backend
+spec:
+  type: ClusterIP
+  ports:
+    - port: {{ $port }}
+      targetPort: mcp
+      protocol: TCP
+      name: mcp
+  selector:
+    {{- include "mt-mcp-proxy.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: backend
+{{- end }}

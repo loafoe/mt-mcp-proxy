@@ -1,0 +1,4 @@
+/mt-mcp-proxy
+/config.yaml
+*.pem
+.antigravitycli/

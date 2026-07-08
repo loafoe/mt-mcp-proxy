@@ -1,0 +1,17 @@
+# ko build configuration.
+# https://ko.build/configuration/
+#
+# The image is built from the cmd/mt-mcp-proxy package and pushed to
+# ghcr.io/loafoe (set via KO_DOCKER_REPO in the workflow / your shell).
+defaultBaseImage: cgr.dev/chainguard/static:latest
+
+builds:
+  - id: mt-mcp-proxy
+    main: ./cmd/mt-mcp-proxy
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s
+      - -w

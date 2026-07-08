@@ -1,0 +1,27 @@
+# Config for the docker-compose example. Uses insecure auth (no signature
+# verification) for LOCAL TESTING ONLY — the proxy trusts the JWT's groups claim
+# as-is. Use jwks/static in any real deployment.
+server:
+  listen: ":8080"
+  path: "/mcp"
+observability:
+  metrics_listen: ":9090"
+  metrics_path: "/metrics"
+auth:
+  mode: insecure
+  groups_claim: groups
+backends:
+  - name: github
+    url: "http://github-mcp-server:8082/"   # compose service name
+    # Defaults (Authorization / Bearer) match github-mcp-server.
+    tenants:
+      - id: team-platform
+        groups: [platform-eng]
+        credential: "${GITHUB_PAT_PLATFORM}"
+        headers:
+          X-MCP-Toolsets: "repos,issues,pull_requests"
+      - id: team-data
+        groups: [data-eng]
+        credential: "${GITHUB_PAT_DATA}"
+        headers:
+          X-MCP-Readonly: "true"

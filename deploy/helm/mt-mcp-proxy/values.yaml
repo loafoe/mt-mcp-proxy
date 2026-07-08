@@ -1,0 +1,174 @@
+# Default values for mt-mcp-proxy.
+#
+# This chart fronts ONE downstream MCP product per deployment (a github proxy, a
+# grafana proxy, ...). The backend may be MANAGED (the chart deploys it) or
+# EXTERNAL (you point at an already-running streamable-HTTP MCP server).
+# Defaults below front github-mcp-server.
+
+# -- Override the name of the chart
+nameOverride: ""
+# -- Override the fully qualified name of the chart
+fullnameOverride: ""
+
+# -- Number of proxy replicas (sessions are in-memory; use sticky routing with >1)
+replicaCount: 1
+
+image:
+  # -- Registry repository for the mt-mcp-proxy image
+  repository: ghcr.io/loafoe/mt-mcp-proxy
+  # -- Image tag (the release workflow publishes ghcr.io/loafoe/mt-mcp-proxy:<git-tag>)
+  tag: "v0.1.0"
+  # -- Image pull policy
+  pullPolicy: IfNotPresent
+
+service:
+  # -- Kubernetes Service type for exposing the proxy
+  type: ClusterIP
+  # -- Service port
+  port: 8080
+
+server:
+  # -- Port the proxy listens on inside the container
+  port: 8080
+  # -- Exposed MCP endpoint path
+  path: /mcp
+
+# -- Prometheus metrics on a SEPARATE listener (isolated from the /mcp data plane).
+metrics:
+  # -- Enable the metrics listener (adds container/service port + config block)
+  enabled: true
+  # -- Port the proxy serves Prometheus metrics on
+  port: 9090
+  # -- Path the metrics endpoint is served on
+  path: /metrics
+
+# -- OpenTelemetry tracing. Enabled inside the proxy only when
+# OTEL_EXPORTER_OTLP_ENDPOINT is set. The proxy always injects W3C traceparent
+# on backend calls, so setting OTEL_* on the backend correlates traces.
+tracing:
+  # -- Enable tracing by setting OTEL_* env on the proxy
+  enabled: false
+  # -- OTLP gRPC collector endpoint (sets OTEL_EXPORTER_OTLP_ENDPOINT)
+  endpoint: "http://otel-collector:4317"
+  # -- Service name reported by the proxy (sets OTEL_SERVICE_NAME)
+  serviceName: "mt-mcp-proxy"
+  # -- Additional raw OTEL_* env vars to set on the proxy container
+  extraEnv: {}
+    # OTEL_EXPORTER_OTLP_INSECURE: "true"
+
+# -- ServiceMonitor for Prometheus Operator scraping of the proxy metrics port
+serviceMonitor:
+  # -- Enable ServiceMonitor creation (requires the Prometheus Operator CRDs)
+  enabled: false
+  # -- Namespace for the ServiceMonitor (defaults to release namespace)
+  namespace: ""
+  # -- Additional labels for ServiceMonitor discovery (e.g. release: kube-prometheus-stack)
+  labels: {}
+  # -- Scrape interval
+  interval: "30s"
+  # -- Scrape timeout
+  scrapeTimeout: "10s"
+
+# -- Authentication for incoming client/LLM JWTs
+auth:
+  # -- JWT verification mode: jwks | static | insecure
+  mode: jwks
+  # -- JWT claim holding the caller's groups
+  groupsClaim: groups
+  # -- Expected issuer (iss)
+  issuer: "https://issuer.company.com"
+  # -- Expected audience (aud)
+  audience: "mt-mcp-proxy"
+  # -- Optional explicit JWKS URL (if omitted, discovered via OIDC metadata)
+  jwksUrl: ""
+  # -- Extra acceptable audiences beyond `audience`
+  additionalAudiences: []
+  # -- Static mode credentials (only when auth.mode is "static")
+  # hmacSecret: "my-hmac-shared-key"
+  # publicKeyPemFile mounted at /etc/mt-mcp-proxy/keys/public.pem if set
+  publicKeyPemFile: ""
+
+# -- The single downstream MCP backend this deployment fronts.
+backend:
+  # -- Internal/ops name (logging, DNS of the managed backend service)
+  name: github
+  # -- How the credential is injected downstream. Defaults suit github-mcp-server
+  # (Authorization: Bearer <token>). For an API-key backend set e.g.
+  # credentialHeader: X-Api-Key and credentialScheme: "".
+  credentialHeader: Authorization
+  credentialScheme: Bearer
+  # -- Optional static headers sent toward the backend on every request
+  headers: {}
+
+  # -- Managed backend: when enabled, the chart deploys the downstream MCP server
+  # (a Deployment + Service) and wires the proxy to it via in-cluster DNS.
+  # When disabled, set backend.externalUrl to a pre-existing streamable-HTTP MCP
+  # endpoint (the proxy routes directly to it; nothing is deployed).
+  # SECURITY: an external/managed backend has NO inbound auth of its own — it
+  # must be reachable only from the proxy (NetworkPolicy / cluster-internal),
+  # since anyone who can reach it bypasses the proxy's JWT verification.
+  managed:
+    # -- Deploy the downstream MCP server as part of this release
+    enabled: true
+    image:
+      # -- Downstream MCP server image (default: github-mcp-server)
+      repository: ghcr.io/github/github-mcp-server
+      tag: "latest"
+      pullPolicy: IfNotPresent
+    # -- Command/args to launch the backend in streamable-HTTP mode.
+    # github-mcp-server: `http` serves MCP at / on :8082.
+    command: []
+    args: ["http"]
+    # -- Container port the backend's MCP endpoint listens on
+    port: 8082
+    # -- Env vars for the backend container (e.g. GITHUB_HOST for GHES). Do NOT
+    # put per-tenant tokens here — those are injected per request by the proxy.
+    env: {}
+    resources: {}
+
+  # -- External backend URL (used only when backend.managed.enabled is false),
+  # e.g. "http://github-mcp-server.example.svc:8082/".
+  externalUrl: ""
+
+# -- Tenants this deployment serves. Model: groups authorize, tenant selects,
+# backend executes. Each tenant's id is advertised via list_instances and is the
+# `tenant` tool-argument value; its groups gate access; its credential is the
+# downstream token injected for its calls (e.g. a per-team GitHub PAT).
+tenants:
+  - # -- Globally unique tenant id (routing key)
+    id: team-platform
+    # -- JWT groups authorized to select this tenant
+    groups: ["platform-eng"]
+    # -- Optional per-tenant headers (merge over backend.headers)
+    headers:
+      X-MCP-Toolsets: "repos,issues,pull_requests"
+    # -- Downstream credential for this tenant. Provided via a Secret so it never
+    # lands in the rendered ConfigMap; the config references it as ${ENV} and the
+    # proxy resolves it from the env var at startup.
+    credentialSecret:
+      # -- Secret name holding this tenant's credential
+      name: github-pat-platform
+      # -- Key in the Secret
+      key: token
+      # -- Have the chart create the Secret inline from `value` (dev/testing)
+      create: false
+      # -- Raw credential (only used when create is true)
+      value: ""
+  - id: team-data
+    groups: ["data-eng"]
+    headers:
+      X-MCP-Readonly: "true"
+    credentialSecret:
+      name: github-pat-data
+      key: token
+      create: false
+      value: ""
+
+# -- Proxy pod resources
+resources: {}
+# -- Node selectors
+nodeSelector: {}
+# -- Tolerations
+tolerations: []
+# -- Affinity
+affinity: {}

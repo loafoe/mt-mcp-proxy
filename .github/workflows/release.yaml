@@ -1,0 +1,78 @@
+name: Build and publish OCI image
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  KO_DOCKER_REPO: ghcr.io/loafoe/mt-mcp-proxy
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write       # push image to GHCR
+      id-token: write        # keyless cosign signing via OIDC
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          check-latest: true
+
+      - name: Run tests
+        run: go test ./...
+
+      - name: Set up ko
+        uses: ko-build/setup-ko@v0.9
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image tags
+        id: tags
+        run: |
+          tags="sha-${GITHUB_SHA::12}"
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            tags="${tags},${GITHUB_REF_NAME}"
+          fi
+          if [ "${GITHUB_REF}" = "refs/heads/main" ]; then
+            tags="${tags},latest"
+          fi
+          echo "tags=${tags}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push multi-arch image
+        id: build
+        run: |
+          ref=$(ko build ./cmd/mt-mcp-proxy \
+            --platform=linux/amd64,linux/arm64 \
+            --bare \
+            --tags="${{ steps.tags.outputs.tags }}" \
+            --image-refs=image-refs.txt)
+          echo "Built: ${ref}"
+          digest_ref=$(head -n1 image-refs.txt)
+          echo "digest=${digest_ref}" >> "$GITHUB_OUTPUT"
+
+      - name: Sign image (keyless)
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+        run: |
+          cosign sign --yes "${{ steps.build.outputs.digest }}"

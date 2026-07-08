@@ -1,0 +1,34 @@
+# Runnable example: mt-mcp-proxy fronting github-mcp-server (streamable-HTTP).
+#
+#   1. Provide per-tenant GitHub PATs in the environment (or a .env file):
+#        export GITHUB_PAT_PLATFORM=ghp_...
+#        export GITHUB_PAT_DATA=ghp_...
+#   2. docker compose -f deploy/docker-compose.yaml up
+#   3. Point an MCP client at http://localhost:8080/mcp with a Bearer JWT whose
+#      `groups` claim contains platform-eng or data-eng.
+#
+# This example uses auth.mode=insecure via ./config.example.yaml — swap in a real
+# jwks/static config for anything beyond local testing.
+services:
+  github-mcp-server:
+    image: ghcr.io/github/github-mcp-server:latest
+    command: ["http"]      # streamable-HTTP, MCP served at / on :8082
+    expose:
+      - "8082"
+    # No token here: the proxy injects each tenant's PAT per request.
+
+  mt-mcp-proxy:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    depends_on:
+      - github-mcp-server
+    ports:
+      - "8080:8080"   # MCP endpoint (/mcp)
+      - "9090:9090"   # Prometheus metrics
+    environment:
+      GITHUB_PAT_PLATFORM: ${GITHUB_PAT_PLATFORM:?set GITHUB_PAT_PLATFORM}
+      GITHUB_PAT_DATA: ${GITHUB_PAT_DATA:?set GITHUB_PAT_DATA}
+    volumes:
+      - ./compose-config.yaml:/etc/mt-mcp-proxy/config.yaml:ro
+    command: ["-config", "/etc/mt-mcp-proxy/config.yaml"]

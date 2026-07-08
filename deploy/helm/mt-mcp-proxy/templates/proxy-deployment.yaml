@@ -1,0 +1,102 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "mt-mcp-proxy.fullname" . }}
+  labels:
+    {{- include "mt-mcp-proxy.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "mt-mcp-proxy.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: proxy
+  template:
+    metadata:
+      labels:
+        {{- include "mt-mcp-proxy.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: proxy
+      annotations:
+        # Force a rolling update when the rendered config changes.
+        checksum/config: {{ include (print $.Template.BasePath "/proxy-configmap.yaml") . | sha256sum }}
+    spec:
+      containers:
+        - name: {{ .Chart.Name }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - "/ko-app/mt-mcp-proxy"
+            - "-config"
+            - "/etc/mt-mcp-proxy/config.yaml"
+          ports:
+            - name: http
+              containerPort: {{ .Values.server.port | default 8080 }}
+              protocol: TCP
+            {{- if .Values.metrics.enabled }}
+            - name: metrics
+              containerPort: {{ .Values.metrics.port | default 9090 }}
+              protocol: TCP
+            {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          env:
+            {{- if .Values.tracing.enabled }}
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "{{ .Values.tracing.endpoint }}"
+            - name: OTEL_SERVICE_NAME
+              value: "{{ .Values.tracing.serviceName | default "mt-mcp-proxy" }}"
+            {{- range $k, $v := .Values.tracing.extraEnv }}
+            - name: "{{ $k }}"
+              value: "{{ $v }}"
+            {{- end }}
+            {{- end }}
+            # Map each tenant's credential Secret into the ${ENV} the rendered
+            # config references, so secrets never appear in the ConfigMap.
+            {{- range .Values.tenants }}
+            - name: "{{ include "mt-mcp-proxy.credEnv" .id }}"
+              valueFrom:
+                secretKeyRef:
+                  name: "{{ .credentialSecret.name }}"
+                  key: "{{ .credentialSecret.key | default "token" }}"
+            {{- end }}
+          volumeMounts:
+            - name: config-volume
+              mountPath: /etc/mt-mcp-proxy
+              readOnly: true
+            {{- if and (eq .Values.auth.mode "static") .Values.auth.publicKeyPemFile }}
+            - name: keys-volume
+              mountPath: /etc/mt-mcp-proxy/keys
+              readOnly: true
+            {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      volumes:
+        - name: config-volume
+          configMap:
+            name: {{ include "mt-mcp-proxy.fullname" . }}-config
+        {{- if and (eq .Values.auth.mode "static") .Values.auth.publicKeyPemFile }}
+        - name: keys-volume
+          configMap:
+            name: {{ include "mt-mcp-proxy.fullname" . }}-keys
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

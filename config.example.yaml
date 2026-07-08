@@ -1,0 +1,86 @@
+# Example configuration for mt-mcp-proxy.
+#
+# mt-mcp-proxy is a generic multi-tenant auth gateway in front of ANY MCP server
+# that speaks the streamable-HTTP transport. This example fronts a single
+# `github-mcp-server http` process and maps each team (JWT group) to its own
+# GitHub token. The same shape works for mcp-grafana or any other MCP server.
+server:
+  listen: ":8080"
+  path: "/mcp"          # streamable-http endpoint exposed to clients
+
+# Observability. Metrics are exposed via OpenTelemetry on a SEPARATE listener so
+# the scrape plane is isolated from the data plane. Tracing is NOT configured
+# here: it is driven by the standard OTEL_* environment variables (e.g.
+# OTEL_EXPORTER_OTLP_ENDPOINT) and is enabled only when an OTLP endpoint is set.
+# The proxy injects W3C traceparent on backend calls, so setting the same OTEL_*
+# vars on the downstream MCP server correlates traces end-to-end.
+observability:
+  metrics_listen: ":9090"   # Prometheus scrape listener; "" disables it
+  metrics_path: "/metrics"
+
+auth:
+  # mode: jwks | static | insecure
+  mode: jwks
+  groups_claim: groups  # JWT claim holding the tenant group(s)
+  issuer: https://issuer.example.com
+  audience: mt-mcp-proxy
+  # jwks_url is optional: when omitted it is discovered from the issuer's
+  # OIDC metadata ({issuer}/.well-known/openid-configuration -> jwks_uri).
+  # jwks_url: https://issuer.example.com/.well-known/jwks.json
+
+  # --- static mode (instead of jwks) ---
+  # mode: static
+  # hmac_secret: "shared-symmetric-secret"
+  # -- or --
+  # public_key_pem_file: /etc/mt-mcp-proxy/pub.pem
+
+  # --- insecure mode (trusted gateway already verified the token) ---
+  # mode: insecure
+
+# Each backend is one unmodified downstream MCP server (streamable-HTTP). A
+# backend registers one or more TENANTS — the selectable units the proxy
+# advertises. Model:
+#   groups authorize, tenant selects, backend executes.
+# A tenant id is what the agent targets via the `tenant` tool argument and what
+# `list_instances` lists. The caller's JWT groups must intersect a tenant's
+# `groups` to use it.
+backends:
+  - name: github                       # internal/ops label (logging only)
+    url: http://github-mcp-server:8082/  # `github-mcp-server http` (MCP at /)
+    # credential_header/credential_scheme control how the downstream credential
+    # is injected. Defaults shown; github-mcp-server reads the token from
+    # "Authorization: Bearer <token>", so the defaults are correct.
+    # credential_header: Authorization
+    # credential_scheme: Bearer
+    #
+    # A backend-level credential is the default/fallback for tenants that don't
+    # set their own. For github each tenant supplies its own PAT below, so no
+    # backend-level credential is needed.
+    tenants:
+      - id: team-platform              # advertised + selectable tenant id
+        groups: [platform-eng]         # JWT groups authorized for this tenant
+        # This tenant's downstream GitHub token, injected per request as
+        # "Authorization: Bearer <token>". Use a ${ENV_VARIABLE} reference to
+        # keep the secret out of this file; an unset variable fails startup.
+        credential: "${GITHUB_PAT_PLATFORM}"
+        headers:                       # optional per-tenant headers
+          # Narrow this tenant's tools (github-mcp-server honors X-MCP-*).
+          X-MCP-Toolsets: "repos,issues,pull_requests"
+      - id: team-data
+        groups: [data-eng]
+        credential: "${GITHUB_PAT_DATA}"
+        headers:
+          X-MCP-Readonly: "true"
+
+# --- Alternative: fronting mcp-grafana ---
+# backends:
+#   - name: grafana
+#     url: http://mcp-grafana:8000/mcp
+#     credential: "${GRAFANA_SA_TOKEN}"   # backend-wide Grafana service-account token
+#     tenants:
+#       - id: team-a
+#         groups: [team-a]
+#         headers: { X-Grafana-Org-Id: "1" }   # one backend, many orgs as tenants
+#       - id: team-b
+#         groups: [team-b]
+#         headers: { X-Grafana-Org-Id: "2" }
