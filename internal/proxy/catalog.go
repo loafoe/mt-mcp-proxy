@@ -19,18 +19,21 @@ var defaultInitParams = json.RawMessage(`{"protocolVersion":"2025-03-26","capabi
 // catalog caches the reference backend's tool list. All backends are assumed to
 // expose the identical catalog, so one fetch serves every caller.
 type catalog struct {
-	ref *registry.Backend
-	ttl time.Duration
-	now func() time.Time
+	ref  *registry.Backend
+	cred string // credential used to authenticate the catalog fetch
+	ttl  time.Duration
+	now  func() time.Time
 
 	mu        sync.Mutex
 	tools     []rawTool
 	fetchedAt time.Time
 }
 
-// NewCatalog creates a tool-catalog cache backed by the reference backend.
-func NewCatalog(ref *registry.Backend, ttl time.Duration) *catalog {
-	return &catalog{ref: ref, ttl: ttl, now: time.Now}
+// NewCatalog creates a tool-catalog cache backed by the reference backend,
+// authenticating the fetch with cred (the backend default credential, or the
+// reference tenant's credential when the backend has none).
+func NewCatalog(ref *registry.Backend, cred string, ttl time.Duration) *catalog {
+	return &catalog{ref: ref, cred: cred, ttl: ttl, now: time.Now}
 }
 
 // tools returns the cached catalog, refreshing it from the reference backend if
@@ -59,7 +62,7 @@ func (c *catalog) get(ctx context.Context) ([]rawTool, error) {
 // every request on a credential (e.g. github-mcp-server) still serve the catalog.
 func (c *catalog) fetch(ctx context.Context) ([]rawTool, error) {
 	client := newBackendClient(c.ref)
-	cred := c.ref.Credential
+	cred := c.cred
 	sid, _, err := client.initialize(ctx, defaultInitParams, cred)
 	if err != nil {
 		return nil, err

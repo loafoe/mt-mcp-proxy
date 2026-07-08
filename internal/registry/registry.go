@@ -60,9 +60,10 @@ var ErrUnknownTenant = errors.New("unknown tenant")
 
 // Registry is an immutable tenant index built at startup.
 type Registry struct {
-	byTenant map[string]*Tenant // tenant id -> tenant
-	backends []*Backend         // in config order
-	ref      *Backend           // reference backend for the tool catalog
+	byTenant  map[string]*Tenant // tenant id -> tenant
+	backends  []*Backend         // in config order
+	ref       *Backend           // reference backend for the tool catalog
+	refTenant *Tenant            // first tenant of the reference backend
 }
 
 // New builds a Registry from backend configs. Validation (uniqueness, >=1
@@ -102,12 +103,19 @@ func New(backends []config.BackendConfig) (*Registry, error) {
 			if _, dup := r.byTenant[tc.ID]; dup {
 				return nil, fmt.Errorf("duplicate tenant id %q", tc.ID)
 			}
-			r.byTenant[tc.ID] = &Tenant{
+			t := &Tenant{
 				ID:         tc.ID,
 				Groups:     tc.Groups,
 				Headers:    tc.Headers,
 				Credential: tc.Credential,
 				Backend:    b,
+			}
+			r.byTenant[tc.ID] = t
+			// Remember the reference backend's first tenant, so the catalog fetch
+			// can authenticate even when the backend has no default credential
+			// (per-tenant-only credentials, e.g. github PATs).
+			if b == r.ref && r.refTenant == nil {
+				r.refTenant = t
 			}
 		}
 	}
@@ -121,6 +129,21 @@ func New(backends []config.BackendConfig) (*Registry, error) {
 // (assumed identical) tool catalog.
 func (r *Registry) ReferenceBackend() *Backend {
 	return r.ref
+}
+
+// ReferenceCredential returns the credential to authenticate the catalog fetch
+// with: the reference backend's default credential when set, else its first
+// tenant's credential. Backends that gate every request on a credential (e.g.
+// github-mcp-server) otherwise 401 the catalog fetch when only per-tenant
+// credentials are configured.
+func (r *Registry) ReferenceCredential() string {
+	if r.ref != nil && r.ref.Credential != "" {
+		return r.ref.Credential
+	}
+	if r.refTenant != nil {
+		return r.refTenant.Credential
+	}
+	return ""
 }
 
 // Backends returns all backends in config order.

@@ -80,7 +80,7 @@ func run(configPath string, logger *slog.Logger) error {
 	}()
 
 	store := session.NewStore(30 * time.Minute)
-	cat := proxy.NewCatalog(reg.ReferenceBackend(), 5*time.Minute)
+	cat := proxy.NewCatalog(reg.ReferenceBackend(), reg.ReferenceCredential(), 5*time.Minute)
 	h := proxy.NewHandler(verifier, reg, store, cat, logger, obs, cfg.Server, cfg.Auth)
 
 	healthz := func(w http.ResponseWriter, _ *http.Request) {

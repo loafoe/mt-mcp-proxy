@@ -49,7 +49,7 @@ func harness(t *testing.T, backends []config.BackendConfig) *Handler {
 		t.Fatal(err)
 	}
 	store := session.NewStore(0)
-	cat := NewCatalog(reg.ReferenceBackend(), time.Minute)
+	cat := NewCatalog(reg.ReferenceBackend(), reg.ReferenceCredential(), time.Minute)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	return NewHandler(verifier, reg, store, cat, logger, nil, config.ServerConfig{Path: "/mcp"}, config.AuthConfig{})
 }
