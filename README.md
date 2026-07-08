@@ -136,9 +136,10 @@ handles `POST` (JSON-RPC, answered as `application/json` *or* a streamed
 forwards `tools/call` to the selected tenant's backend.
 
 > **stdio backends** (a downstream MCP server that only speaks stdio, requiring a
-> subprocess per credential) are **not** supported in this version. Both
-> `github-mcp-server http` and `mcp-grafana` speak streamable-HTTP, which covers
-> the multi-tenant case cleanly. stdio support is a possible future addition.
+> subprocess per credential) are **not** supported in this version — this is
+> planned future work, tracked in [`docs/stdio-backends.md`](docs/stdio-backends.md).
+> Both `github-mcp-server http` and `mcp-grafana` speak streamable-HTTP, which
+> covers the multi-tenant case cleanly today.
 
 ## Auth modes
 
