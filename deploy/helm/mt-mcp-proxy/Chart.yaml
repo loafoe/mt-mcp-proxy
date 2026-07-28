@@ -2,5 +2,5 @@ apiVersion: v2
 name: mt-mcp-proxy
 description: A generic multi-tenant JWT/OIDC auth gateway that fronts any streamable-HTTP MCP server (e.g. github-mcp-server, mcp-grafana) with group-based tenant routing and per-tenant credential injection.
 type: application
-version: 0.1.0
+version: 0.2.0
 appVersion: "0.1.0"
