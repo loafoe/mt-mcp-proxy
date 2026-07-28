@@ -58,3 +58,15 @@ Call with the tenant id string, e.g. {{ include "mt-mcp-proxy.credEnv" .id }}.
 {{- $raw := printf "TENANT_%s_CREDENTIAL" . | upper -}}
 {{- regexReplaceAll "[^A-Z0-9_]" $raw "_" -}}
 {{- end }}
+
+{{/*
+The env var name a backend's own credential is mapped into
+(BACKEND_<NAME>_CREDENTIAL, uppercased, non-alphanumerics → underscore). Used
+to keep secrets out of the rendered ConfigMap: the config references ${VAR},
+resolved from this env var. Call with the backend name string, e.g.
+{{ include "mt-mcp-proxy.backendCredEnv" .name }}.
+*/}}
+{{- define "mt-mcp-proxy.backendCredEnv" -}}
+{{- $raw := printf "BACKEND_%s_CREDENTIAL" . | upper -}}
+{{- regexReplaceAll "[^A-Z0-9_]" $raw "_" -}}
+{{- end }}
