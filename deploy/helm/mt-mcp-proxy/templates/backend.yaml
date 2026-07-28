@@ -1,33 +1,38 @@
-{{- if .Values.backend.managed.enabled }}
-{{- $port := .Values.backend.managed.port | default 8082 }}
+{{- range .Values.backends }}
+{{- if .managed.enabled }}
+{{- $port := .managed.port | default 8082 }}
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "mt-mcp-proxy.fullname" . }}-backend
+  name: {{ include "mt-mcp-proxy.fullname" $ }}-{{ .name }}-backend
   labels:
-    {{- include "mt-mcp-proxy.labels" . | nindent 4 }}
+    {{- include "mt-mcp-proxy.labels" $ | nindent 4 }}
     app.kubernetes.io/component: backend
+    mcp-backend: "{{ .name }}"
 spec:
   replicas: 1
   selector:
     matchLabels:
-      {{- include "mt-mcp-proxy.selectorLabels" . | nindent 6 }}
+      {{- include "mt-mcp-proxy.selectorLabels" $ | nindent 6 }}
       app.kubernetes.io/component: backend
+      mcp-backend: "{{ .name }}"
   template:
     metadata:
       labels:
-        {{- include "mt-mcp-proxy.selectorLabels" . | nindent 8 }}
+        {{- include "mt-mcp-proxy.selectorLabels" $ | nindent 8 }}
         app.kubernetes.io/component: backend
+        mcp-backend: "{{ .name }}"
     spec:
       containers:
         - name: backend
-          image: "{{ .Values.backend.managed.image.repository }}:{{ .Values.backend.managed.image.tag }}"
-          imagePullPolicy: {{ .Values.backend.managed.image.pullPolicy | default "IfNotPresent" }}
-          {{- with .Values.backend.managed.command }}
+          image: "{{ .managed.image.repository }}:{{ .managed.image.tag }}"
+          imagePullPolicy: {{ .managed.image.pullPolicy | default "IfNotPresent" }}
+          {{- with .managed.command }}
           command:
             {{- toYaml . | nindent 12 }}
           {{- end }}
-          {{- with .Values.backend.managed.args }}
+          {{- with .managed.args }}
           args:
             {{- toYaml . | nindent 12 }}
           {{- end }}
@@ -35,23 +40,44 @@ spec:
             - name: mcp
               containerPort: {{ $port }}
               protocol: TCP
-          {{- with .Values.backend.managed.env }}
+            {{- if $.Values.backendMetrics.enabled }}
+            - name: metrics
+              containerPort: {{ $.Values.backendMetrics.port | default 9090 }}
+              protocol: TCP
+            {{- end }}
           env:
-            {{- range $k, $v := . }}
+            {{- range $k, $v := .managed.env }}
             - name: "{{ $k }}"
               value: "{{ $v }}"
             {{- end }}
-          {{- end }}
+            {{- if and .credentialSecret .credentialSecret.name .managed.credentialEnvVar }}
+            - name: "{{ .managed.credentialEnvVar }}"
+              valueFrom:
+                secretKeyRef:
+                  name: "{{ .credentialSecret.name }}"
+                  key: "{{ .credentialSecret.key | default "token" }}"
+            {{- end }}
+            {{- if and $.Values.tracing.enabled $.Values.tracing.enableOnBackends }}
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "{{ $.Values.tracing.endpoint }}"
+            - name: OTEL_SERVICE_NAME
+              value: "{{ .name }}-backend"
+            {{- range $k, $v := $.Values.tracing.extraEnv }}
+            - name: "{{ $k }}"
+              value: "{{ $v }}"
+            {{- end }}
+            {{- end }}
           resources:
-            {{- toYaml .Values.backend.managed.resources | nindent 12 }}
+            {{- toYaml .managed.resources | nindent 12 }}
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ include "mt-mcp-proxy.fullname" . }}-backend
+  name: {{ include "mt-mcp-proxy.fullname" $ }}-{{ .name }}-backend
   labels:
-    {{- include "mt-mcp-proxy.labels" . | nindent 4 }}
+    {{- include "mt-mcp-proxy.labels" $ | nindent 4 }}
     app.kubernetes.io/component: backend
+    mcp-backend: "{{ .name }}"
 spec:
   type: ClusterIP
   ports:
@@ -59,7 +85,15 @@ spec:
       targetPort: mcp
       protocol: TCP
       name: mcp
+    {{- if $.Values.backendMetrics.enabled }}
+    - port: {{ $.Values.backendMetrics.port | default 9090 }}
+      targetPort: metrics
+      protocol: TCP
+      name: metrics
+    {{- end }}
   selector:
-    {{- include "mt-mcp-proxy.selectorLabels" . | nindent 4 }}
+    {{- include "mt-mcp-proxy.selectorLabels" $ | nindent 4 }}
     app.kubernetes.io/component: backend
+    mcp-backend: "{{ .name }}"
+{{- end }}
 {{- end }}
