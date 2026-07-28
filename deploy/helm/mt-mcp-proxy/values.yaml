@@ -55,6 +55,9 @@ tracing:
   # -- Additional raw OTEL_* env vars to set on the proxy container
   extraEnv: {}
     # OTEL_EXPORTER_OTLP_INSECURE: "true"
+  # -- Also set OTEL_* env on managed backend pods so they join the proxy's
+  # trace. OTEL_SERVICE_NAME is derived per backend (<backend-name>-backend).
+  enableOnBackends: false
 
 # -- ServiceMonitor for Prometheus Operator scraping of the proxy metrics port
 serviceMonitor:
@@ -88,81 +91,135 @@ auth:
   # publicKeyPemFile mounted at /etc/mt-mcp-proxy/keys/public.pem if set
   publicKeyPemFile: ""
 
-# -- The single downstream MCP backend this deployment fronts.
-backend:
-  # -- Internal/ops name (logging, DNS of the managed backend service)
-  name: github
-  # -- How the credential is injected downstream. Defaults suit github-mcp-server
-  # (Authorization: Bearer <token>). For an API-key backend set e.g.
-  # credentialHeader: X-Api-Key and credentialScheme: "".
-  credentialHeader: Authorization
-  credentialScheme: Bearer
-  # -- Optional static headers sent toward the backend on every request
-  headers: {}
+# -- The downstream MCP backends this deployment fronts. Each entry is either
+# MANAGED (the chart deploys a Deployment+Service for it) or EXTERNAL (you
+# point at an already-running streamable-HTTP MCP server). One deployment can
+# front multiple backends of the same product (e.g. several Grafana
+# instances) or, by convention, a single product.
+backends:
+  - # -- Internal/ops name (logging, DNS of the managed backend service).
+    # Must be unique across all entries in this list.
+    name: github
+    # -- How the credential is injected downstream. Defaults suit
+    # github-mcp-server (Authorization: Bearer <token>). For an API-key
+    # backend set e.g. credentialHeader: X-Api-Key and credentialScheme: "".
+    credentialHeader: Authorization
+    credentialScheme: Bearer
+    # -- Optional static headers sent toward this backend on every request
+    headers: {}
 
-  # -- Managed backend: when enabled, the chart deploys the downstream MCP server
-  # (a Deployment + Service) and wires the proxy to it via in-cluster DNS.
-  # When disabled, set backend.externalUrl to a pre-existing streamable-HTTP MCP
-  # endpoint (the proxy routes directly to it; nothing is deployed).
-  # SECURITY: an external/managed backend has NO inbound auth of its own — it
-  # must be reachable only from the proxy (NetworkPolicy / cluster-internal),
-  # since anyone who can reach it bypasses the proxy's JWT verification.
-  managed:
-    # -- Deploy the downstream MCP server as part of this release
-    enabled: true
-    image:
-      # -- Downstream MCP server image (default: github-mcp-server)
-      repository: ghcr.io/github/github-mcp-server
-      tag: "latest"
-      pullPolicy: IfNotPresent
-    # -- Command/args to launch the backend in streamable-HTTP mode.
-    # github-mcp-server: `http` serves MCP at / on :8082.
-    command: []
-    args: ["http"]
-    # -- Container port the backend's MCP endpoint listens on
-    port: 8082
-    # -- Env vars for the backend container (e.g. GITHUB_HOST for GHES). Do NOT
-    # put per-tenant tokens here — those are injected per request by the proxy.
-    env: {}
-    resources: {}
-
-  # -- External backend URL (used only when backend.managed.enabled is false),
-  # e.g. "http://github-mcp-server.example.svc:8082/".
-  externalUrl: ""
-
-# -- Tenants this deployment serves. Model: groups authorize, tenant selects,
-# backend executes. Each tenant's id is advertised via list_instances and is the
-# `tenant` tool-argument value; its groups gate access; its credential is the
-# downstream token injected for its calls (e.g. a per-team GitHub PAT).
-tenants:
-  - # -- Globally unique tenant id (routing key)
-    id: team-platform
-    # -- JWT groups authorized to select this tenant
-    groups: ["platform-eng"]
-    # -- Optional per-tenant headers (merge over backend.headers)
-    headers:
-      X-MCP-Toolsets: "repos,issues,pull_requests"
-    # -- Downstream credential for this tenant. Provided via a Secret so it never
-    # lands in the rendered ConfigMap; the config references it as ${ENV} and the
-    # proxy resolves it from the env var at startup.
+    # -- Backend-level credential (optional). Used as the downstream token
+    # when a tenant of this backend does not supply its own credentialSecret
+    # (e.g. github: each tenant has its own PAT, so this is usually empty; a
+    # Grafana backend: one SA token shared by that backend's tenant(s), so
+    # this is set and per-tenant credentialSecret is omitted). Provided via a
+    # Secret so it never lands in the rendered ConfigMap.
     credentialSecret:
-      # -- Secret name holding this tenant's credential
-      name: github-pat-platform
+      # -- Secret name holding this backend's credential (empty = none)
+      name: ""
       # -- Key in the Secret
       key: token
       # -- Have the chart create the Secret inline from `value` (dev/testing)
       create: false
       # -- Raw credential (only used when create is true)
       value: ""
-  - id: team-data
-    groups: ["data-eng"]
-    headers:
-      X-MCP-Readonly: "true"
-    credentialSecret:
-      name: github-pat-data
-      key: token
-      create: false
-      value: ""
+
+    # -- Managed backend: when enabled, the chart deploys the downstream MCP
+    # server (a Deployment + Service) and wires the proxy to it via in-cluster
+    # DNS. When disabled, set `externalUrl` to a pre-existing streamable-HTTP
+    # MCP endpoint (the proxy routes directly to it; nothing is deployed).
+    # SECURITY: an external/managed backend has NO inbound auth of its own —
+    # it must be reachable only from the proxy (NetworkPolicy / cluster-
+    # internal), since anyone who can reach it bypasses the proxy's JWT
+    # verification.
+    managed:
+      # -- Deploy the downstream MCP server as part of this release
+      enabled: true
+      image:
+        # -- Downstream MCP server image (default: github-mcp-server)
+        repository: ghcr.io/github/github-mcp-server
+        tag: "latest"
+        pullPolicy: IfNotPresent
+      # -- Command/args to launch the backend in streamable-HTTP mode.
+      # github-mcp-server: `http` serves MCP at / on :8082.
+      command: []
+      args: ["http"]
+      # -- Container port the backend's MCP endpoint listens on
+      port: 8082
+      # -- Env vars for the backend container (e.g. GITHUB_HOST for GHES). Do
+      # NOT put per-tenant tokens here — those are injected per request by the
+      # proxy.
+      env: {}
+      # -- If this backend needs its OWN upstream credential injected as an
+      # env var (as opposed to the proxy injecting it as a header toward
+      # github-mcp-server), set the env var name the binary expects here,
+      # e.g. "GRAFANA_SERVICE_ACCOUNT_TOKEN" for grafana/mcp-grafana. The
+      # value comes from this backend's credentialSecret (below). Leave
+      # empty for backends like github-mcp-server that take no credential of
+      # their own (the proxy is the one authenticating to them).
+      credentialEnvVar: ""
+      resources: {}
+
+    # -- External backend URL (used only when managed.enabled is false), e.g.
+    # "http://github-mcp-server.example.svc:8082/".
+    externalUrl: ""
+
+    # -- Tenants this backend serves. Model: groups authorize, tenant
+    # selects, backend executes. Each tenant's id is advertised via
+    # list_instances and is the `tenant` tool-argument value; its groups gate
+    # access; its credential (if set) overrides the backend-level credential
+    # above for calls routed to this tenant.
+    tenants:
+      - # -- Globally unique tenant id (routing key) across ALL backends
+        id: team-platform
+        # -- JWT groups authorized to select this tenant
+        groups: ["platform-eng"]
+        # -- Optional per-tenant headers (merge over backend headers)
+        headers:
+          X-MCP-Toolsets: "repos,issues,pull_requests"
+        # -- Per-tenant credential override (optional). Omit name to fall
+        # back to the backend-level credentialSecret above.
+        credentialSecret:
+          name: github-pat-platform
+          key: token
+          create: false
+          value: ""
+      - id: team-data
+        groups: ["data-eng"]
+        headers:
+          X-MCP-Readonly: "true"
+        credentialSecret:
+          name: github-pat-data
+          key: token
+          create: false
+          value: ""
+
+# -- Metrics for MANAGED backend pods (external backends are scraped by
+# whoever runs them). Applies uniformly to every managed backend in the
+# `backends` list — matches mt-mcp-grafana's single global block; no evidence
+# different backends need different metrics ports/paths.
+backendMetrics:
+  # -- Enable a metrics container port + env on managed backends
+  enabled: false
+  # -- Port managed backends serve Prometheus metrics on
+  port: 9090
+  # -- Path managed backends serve metrics on
+  path: /metrics
+  serviceMonitor:
+    # -- Enable ServiceMonitor creation for managed-backend metrics
+    enabled: false
+    # -- Namespace for the ServiceMonitor (defaults to release namespace)
+    namespace: ""
+    # -- Additional labels for ServiceMonitor discovery
+    labels: {}
+    # -- Scrape interval
+    interval: "30s"
+    # -- Scrape timeout
+    scrapeTimeout: "10s"
+    # -- Relabeling rules applied before scraping
+    relabelings: []
+    # -- Metric relabeling rules applied after scraping
+    metricRelabelings: []
 
 # -- Proxy pod resources
 resources: {}
