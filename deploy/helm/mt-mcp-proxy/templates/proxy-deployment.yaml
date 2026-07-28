@@ -59,14 +59,27 @@ spec:
               value: "{{ $v }}"
             {{- end }}
             {{- end }}
-            # Map each tenant's credential Secret into the ${ENV} the rendered
-            # config references, so secrets never appear in the ConfigMap.
-            {{- range .Values.tenants }}
+            # Map each backend's own credential Secret (if set) and each of
+            # its tenants' credential Secrets into the ${ENV} vars the
+            # rendered config references, so secrets never appear in the
+            # ConfigMap.
+            {{- range .Values.backends }}
+            {{- if and .credentialSecret .credentialSecret.name }}
+            - name: "{{ include "mt-mcp-proxy.backendCredEnv" .name }}"
+              valueFrom:
+                secretKeyRef:
+                  name: "{{ .credentialSecret.name }}"
+                  key: "{{ .credentialSecret.key | default "token" }}"
+            {{- end }}
+            {{- range .tenants }}
+            {{- if and .credentialSecret .credentialSecret.name }}
             - name: "{{ include "mt-mcp-proxy.credEnv" .id }}"
               valueFrom:
                 secretKeyRef:
                   name: "{{ .credentialSecret.name }}"
                   key: "{{ .credentialSecret.key | default "token" }}"
+            {{- end }}
+            {{- end }}
             {{- end }}
           volumeMounts:
             - name: config-volume
