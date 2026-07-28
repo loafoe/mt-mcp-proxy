@@ -37,28 +37,34 @@ data:
       {{- end }}
       {{- end }}
     backends:
-      - name: "{{ .Values.backend.name }}"
-        {{- if .Values.backend.managed.enabled }}
-        url: "http://{{ include "mt-mcp-proxy.fullname" . }}-backend:{{ .Values.backend.managed.port | default 8082 }}/"
+      {{- range .Values.backends }}
+      - name: "{{ .name }}"
+        {{- if .managed.enabled }}
+        url: "http://{{ include "mt-mcp-proxy.fullname" $ }}-{{ .name }}-backend:{{ .managed.port | default 8082 }}/"
         {{- else }}
-        url: "{{ required "backend.externalUrl is required when backend.managed.enabled is false" .Values.backend.externalUrl }}"
+        url: "{{ required (printf "backends[%s].externalUrl is required when managed.enabled is false" .name) .externalUrl }}"
         {{- end }}
-        credential_header: "{{ .Values.backend.credentialHeader | default "Authorization" }}"
-        credential_scheme: "{{ .Values.backend.credentialScheme | default "Bearer" }}"
-        {{- with .Values.backend.headers }}
+        {{- if and .credentialSecret .credentialSecret.name }}
+        credential: {{ printf "${%s}" (include "mt-mcp-proxy.backendCredEnv" .name) | quote }}
+        {{- end }}
+        credential_header: "{{ .credentialHeader | default "Authorization" }}"
+        credential_scheme: "{{ .credentialScheme | default "Bearer" }}"
+        {{- with .headers }}
         headers:
           {{- range $k, $v := . }}
           {{ $k }}: {{ $v | quote }}
           {{- end }}
         {{- end }}
         tenants:
-          {{- range .Values.tenants }}
+          {{- range .tenants }}
           - id: "{{ .id }}"
             groups:
               {{- range .groups }}
               - "{{ . }}"
               {{- end }}
+            {{- if and .credentialSecret .credentialSecret.name }}
             credential: {{ printf "${%s}" (include "mt-mcp-proxy.credEnv" .id) | quote }}
+            {{- end }}
             {{- with .headers }}
             headers:
               {{- range $k, $v := . }}
@@ -66,3 +72,4 @@ data:
               {{- end }}
             {{- end }}
           {{- end }}
+      {{- end }}
