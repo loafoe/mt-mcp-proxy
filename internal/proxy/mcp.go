@@ -101,7 +101,9 @@ func decodeSSE(body io.Reader) ([]byte, error) {
 }
 
 // writeJSONRPCResult writes a successful JSON-RPC response with the given result
-// object and echoed id.
+// object and echoed id. When w is an http.ResponseWriter, the caller MUST set
+// Content-Type before calling this — otherwise net/http sniffs the JSON body
+// and sends text/plain, which breaks strict MCP clients.
 func writeJSONRPCResult(w io.Writer, id json.RawMessage, result any) error {
 	resp := map[string]any{
 		"jsonrpc": "2.0",

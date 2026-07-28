@@ -117,6 +117,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "tools/call":
 		h.handleToolsCall(w, r, &req)
 	case "ping":
+		w.Header().Set("Content-Type", "application/json")
 		_ = writeJSONRPCResult(w, req.ID, map[string]any{})
 	default:
 		// Unknown method: the proxy is the MCP server, so respond rather than
