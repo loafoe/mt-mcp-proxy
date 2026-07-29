@@ -1,9 +1,9 @@
 # Default values for mt-mcp-proxy.
 #
-# This chart fronts ONE downstream MCP product per deployment (a github proxy, a
-# grafana proxy, ...). The backend may be MANAGED (the chart deploys it) or
-# EXTERNAL (you point at an already-running streamable-HTTP MCP server).
-# Defaults below front github-mcp-server.
+# This chart fronts one or more downstream MCP backends per deployment (e.g. a
+# single github-mcp-server, or several mcp-grafana instances). Each backend may
+# be MANAGED (the chart deploys it) or EXTERNAL (you point at an already-running
+# streamable-HTTP MCP server). Defaults below front github-mcp-server.
 
 # -- Override the name of the chart
 nameOverride: ""

@@ -1,6 +1,7 @@
 {{- range .Values.backends }}
 {{- if and .managed .managed.enabled }}
 {{- $port := .managed.port | default 8082 }}
+{{- $image := required (printf "backends[%s].managed.image is required when managed.enabled is true" .name) .managed.image }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -26,8 +27,8 @@ spec:
     spec:
       containers:
         - name: backend
-          image: "{{ .managed.image.repository }}:{{ .managed.image.tag }}"
-          imagePullPolicy: {{ .managed.image.pullPolicy | default "IfNotPresent" }}
+          image: "{{ $image.repository }}:{{ $image.tag }}"
+          imagePullPolicy: {{ $image.pullPolicy | default "IfNotPresent" }}
           {{- with .managed.command }}
           command:
             {{- toYaml . | nindent 12 }}
