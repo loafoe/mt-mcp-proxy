@@ -146,6 +146,11 @@ backends:
       args: ["http"]
       # -- Container port the backend's MCP endpoint listens on
       port: 8082
+      # -- Path this managed backend's MCP endpoint is served on. github-mcp-server
+      # (the default) serves at root; other backends (e.g. mcp-grafana) serve at a
+      # sub-path like "/mcp". Defaults to "/" (root) to preserve today's behavior
+      # for backends that don't set this.
+      path: "/"
       # -- Env vars for the backend container (e.g. GITHUB_HOST for GHES). Do
       # NOT put per-tenant tokens here — those are injected per request by the
       # proxy.

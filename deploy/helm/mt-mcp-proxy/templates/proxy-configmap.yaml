@@ -40,7 +40,7 @@ data:
       {{- range .Values.backends }}
       - name: "{{ .name }}"
         {{- if and .managed .managed.enabled }}
-        url: "http://{{ include "mt-mcp-proxy.fullname" $ }}-{{ .name }}-backend:{{ .managed.port | default 8082 }}/"
+        url: "http://{{ include "mt-mcp-proxy.fullname" $ }}-{{ .name }}-backend:{{ .managed.port | default 8082 }}{{ .managed.path | default "/" }}"
         {{- else }}
         url: "{{ required (printf "backends[%s].externalUrl is required when managed.enabled is false" .name) .externalUrl }}"
         {{- end }}
