@@ -1,5 +1,5 @@
 {{- range .Values.backends }}
-{{- if .managed.enabled }}
+{{- if and .managed .managed.enabled }}
 {{- $port := .managed.port | default 8082 }}
 ---
 apiVersion: apps/v1
