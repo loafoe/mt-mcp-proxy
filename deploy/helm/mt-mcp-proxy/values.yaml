@@ -163,6 +163,30 @@ backends:
       # empty for backends like github-mcp-server that take no credential of
       # their own (the proxy is the one authenticating to them).
       credentialEnvVar: ""
+      # -- Additional secret-backed env vars beyond the single
+      # credentialEnvVar/credentialSecret pair above, for backends that need
+      # more than one secret injected as an env var (e.g. mcp-notifier needs
+      # a Slack AND a Teams webhook URL). Each entry creates one env var
+      # sourced from an existing Secret - these secrets are NOT created by
+      # this chart, create them out-of-band.
+      secretEnv: []
+        # - name: SLACK_WEBHOOK_URL
+        #   secretName: mcp-notifier-slack-default-webhook
+        #   secretKey: webhook-url
+      # -- Optional file-based config for backends that require a config
+      # file rather than plain env vars (e.g. mcp-notifier's YAML webhook
+      # config). Renders a ConfigMap and mounts it read-only at
+      # `mountPath/fileName`. The file content may reference ${ENV_VAR}
+      # placeholders - Kubernetes does NOT expand these, the backend binary
+      # must (mcp-notifier does, via os.Expand against its own env). Combine
+      # with `env` above (for the file path env var, if the backend needs
+      # one) and `credentialEnvVar`/tenant `credentialSecret` (for the
+      # secret-backed values the file's placeholders resolve to).
+      configFile:
+        enabled: false
+        mountPath: /etc/mt-mcp-proxy/backend-config
+        fileName: config.yaml
+        content: ""
       resources: {}
 
     # -- External backend URL (used only when managed.enabled is false), e.g.

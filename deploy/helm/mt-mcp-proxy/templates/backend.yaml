@@ -2,6 +2,21 @@
 {{- if and .managed .managed.enabled }}
 {{- $port := .managed.port | default 8082 }}
 {{- $image := required (printf "backends[%s].managed.image is required when managed.enabled is true" .name) .managed.image }}
+{{- $cfgFile := .managed.configFile }}
+{{- if and $cfgFile $cfgFile.enabled }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "mt-mcp-proxy.fullname" $ }}-{{ .name }}-backend-config
+  labels:
+    {{- include "mt-mcp-proxy.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: backend
+    mcp-backend: "{{ .name }}"
+data:
+  {{ $cfgFile.fileName | default "config.yaml" }}: |
+    {{- $cfgFile.content | nindent 4 }}
+{{- end }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -24,6 +39,10 @@ spec:
         {{- include "mt-mcp-proxy.selectorLabels" $ | nindent 8 }}
         app.kubernetes.io/component: backend
         mcp-backend: "{{ .name }}"
+      {{- if and $cfgFile $cfgFile.enabled }}
+      annotations:
+        checksum/backend-config: {{ $cfgFile.content | sha256sum }}
+      {{- end }}
     spec:
       containers:
         - name: backend
@@ -58,6 +77,13 @@ spec:
                   name: "{{ .credentialSecret.name }}"
                   key: "{{ .credentialSecret.key | default "token" }}"
             {{- end }}
+            {{- range .managed.secretEnv }}
+            - name: "{{ .name }}"
+              valueFrom:
+                secretKeyRef:
+                  name: "{{ .secretName }}"
+                  key: "{{ .secretKey | default "token" }}"
+            {{- end }}
             {{- if and $.Values.tracing.enabled $.Values.tracing.enableOnBackends }}
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               value: "{{ $.Values.tracing.endpoint }}"
@@ -70,6 +96,18 @@ spec:
             {{- end }}
           resources:
             {{- toYaml .managed.resources | nindent 12 }}
+          {{- if and $cfgFile $cfgFile.enabled }}
+          volumeMounts:
+            - name: backend-config
+              mountPath: {{ $cfgFile.mountPath | default "/etc/mt-mcp-proxy/backend-config" }}
+              readOnly: true
+          {{- end }}
+      {{- if and $cfgFile $cfgFile.enabled }}
+      volumes:
+        - name: backend-config
+          configMap:
+            name: {{ include "mt-mcp-proxy.fullname" $ }}-{{ .name }}-backend-config
+      {{- end }}
 ---
 apiVersion: v1
 kind: Service
