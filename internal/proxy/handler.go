@@ -128,7 +128,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleToolsCall(w, r, &req)
 	case "ping":
 		w.Header().Set("Content-Type", "application/json")
-		_ = writeJSONRPCResult(w, req.ID, map[string]any{})
+		_ = writeJSONRPCResult(w, req.ID, h.statelessize(map[string]any{}))
 	default:
 		// Unknown method: the proxy is the MCP server, so respond rather than
 		// blindly forwarding (we don't know which backend it belongs to).
@@ -140,11 +140,28 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// statelessize adds "resultType": "complete" — required on every Result
+// under the 2026-07-28 revision (SEP-2575; verified against
+// modelcontextprotocol/python-sdk's mcp_types package, which rejects any
+// missing "resultType" with a pydantic ValidationError) — but only when the
+// deployment is client-facing stateless: a legacy (2025-03-26) client's
+// result models don't expect the field, and while its presence is harmless
+// there (extra fields are ignored), omitting it for a legacy caller keeps
+// the response shape minimal and expected.
+func (h *Handler) statelessize(result map[string]any) map[string]any {
+	if h.Registry.AllStateless() {
+		result["resultType"] = "complete"
+	}
+	return result
+}
+
 // serverInfoResult is the capability info the proxy advertises as an MCP
-// server, shared by "initialize" and the stateless "server/discover" RPC. The
-// advertised protocolVersion tracks whether every backend is stateless: the
-// proxy can only be stateless toward its own callers when it never needs a
-// client-facing session to key a stateful backend session off of.
+// server for the legacy "initialize" RPC — NOT "server/discover" (see
+// discoverResult; the two have different required result shapes under
+// SEP-2575). The advertised protocolVersion tracks whether every backend is
+// stateless: the proxy can only be stateless toward its own callers when it
+// never needs a client-facing session to key a stateful backend session off
+// of.
 func (h *Handler) serverInfoResult() map[string]any {
 	protocolVersion := config.ProtocolVersionStateful
 	if h.Registry.AllStateless() {
@@ -179,13 +196,36 @@ func (h *Handler) handleInitialize(w http.ResponseWriter, r *http.Request, req *
 	_ = writeJSONRPCResult(w, req.ID, result)
 }
 
-// handleDiscover answers the optional 2026-07-28 "server/discover" RPC: the
-// same capability info as initialize, with no session side effect. It lets a
-// stateless-aware client learn the proxy's capabilities upfront without
-// running the (now optional) initialize handshake.
+// discoverResult is the DiscoverResult shape for the 2026-07-28 "server/discover"
+// RPC (SEP-2575) — NOT the same shape as initialize's result. The real spec's
+// DiscoverResult has no protocolVersion/serverInfo fields at all: it requires
+// cacheScope, capabilities, resultType, supportedVersions, and ttlMs instead
+// (verified against modelcontextprotocol/python-sdk's mcp_types package,
+// which rejects a response missing any of the four required fields with a
+// pydantic ValidationError — a real client, e.g. hermes-agent, hits this).
+func (h *Handler) discoverResult() map[string]any {
+	version := config.ProtocolVersionStateful
+	if h.Registry.AllStateless() {
+		version = config.ProtocolVersionStateless
+	}
+	return map[string]any{
+		// "public": this capability info is not caller/tenant-specific.
+		"cacheScope":        "public",
+		"capabilities":      map[string]any{"tools": map[string]any{"listChanged": false}},
+		"resultType":        "complete",
+		"supportedVersions": []string{version},
+		// 0: always re-fetch: which version this proxy speaks can change on redeploy.
+		"ttlMs": 0,
+	}
+}
+
+// handleDiscover answers the optional 2026-07-28 "server/discover" RPC, with
+// no session side effect. It lets a stateless-aware client learn the proxy's
+// capabilities upfront without running the (now optional) initialize
+// handshake.
 func (h *Handler) handleDiscover(w http.ResponseWriter, req *jsonRPCRequest) {
 	w.Header().Set("Content-Type", "application/json")
-	_ = writeJSONRPCResult(w, req.ID, h.serverInfoResult())
+	_ = writeJSONRPCResult(w, req.ID, h.discoverResult())
 }
 
 // handleToolsList serves the cached catalog with the identity-hybrid transform.
@@ -230,8 +270,19 @@ func (h *Handler) handleToolsList(w http.ResponseWriter, r *http.Request, req *j
 
 	out = append(out, listInstancesToolDef())
 
+	result := map[string]any{"tools": out}
+	if h.Registry.AllStateless() {
+		// ListToolsResult (SEP-2575) requires cacheScope/resultType/ttlMs.
+		// "private": the tenant selector shape above varies by caller identity
+		// (the JWT's authorized tenants), so this response must not be shared
+		// across authorization contexts by an intermediary cache. ttlMs: 0 —
+		// always re-fetch, since a caller's authorized tenants can change.
+		result["cacheScope"] = "private"
+		result["resultType"] = "complete"
+		result["ttlMs"] = 0
+	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = writeJSONRPCResult(w, req.ID, toolsListResult{Tools: out})
+	_ = writeJSONRPCResult(w, req.ID, result)
 }
 
 // handleToolsCall handles the local list_instances tool and tenant
@@ -299,7 +350,7 @@ func (h *Handler) handleToolsCall(w http.ResponseWriter, r *http.Request, req *j
 	if errResult != "" {
 		out.ErrorType = "tenant_selection"
 		w.Header().Set("Content-Type", "application/json")
-		_ = writeJSONRPCResult(w, req.ID, toolResultText(errResult, true))
+		_ = writeJSONRPCResult(w, req.ID, h.statelessize(toolResultText(errResult, true)))
 		return
 	}
 	out.TenantID = tenant.ID
@@ -460,7 +511,7 @@ func (h *Handler) writeInstances(w http.ResponseWriter, id json.RawMessage, tena
 		}
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = writeJSONRPCResult(w, id, toolResultText(sb.String(), false))
+	_ = writeJSONRPCResult(w, id, h.statelessize(toolResultText(sb.String(), false)))
 }
 
 func tenantList(tenants []*registry.Tenant) string {

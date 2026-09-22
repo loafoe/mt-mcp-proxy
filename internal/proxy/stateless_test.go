@@ -95,8 +95,10 @@ func TestDeleteNoOpOnAllStatelessBackends(t *testing.T) {
 	}
 }
 
-// The optional 2026-07-28 "server/discover" RPC mirrors initialize's
-// capability info, without any session side effect, in either mode.
+// The optional 2026-07-28 "server/discover" RPC answers with a DiscoverResult
+// (SEP-2575) — a different required shape than initialize's InitializeResult
+// (no protocolVersion/serverInfo; cacheScope/resultType/supportedVersions/
+// ttlMs instead) — without any session side effect, in either mode.
 func TestServerDiscover(t *testing.T) {
 	fb := newStatelessFakeBackend(t, "grafana-stateless")
 	h := harness(t, []config.BackendConfig{statelessBackendCfg(fb, "grafana-stateless")})
@@ -106,8 +108,21 @@ func TestServerDiscover(t *testing.T) {
 		t.Error("server/discover must never mint a session")
 	}
 	result := decodeResult(t, w)["result"].(map[string]any)
-	if got := result["protocolVersion"]; got != config.ProtocolVersionStateless {
-		t.Errorf("server/discover protocolVersion = %v, want %q", got, config.ProtocolVersionStateless)
+	if got := result["cacheScope"]; got != "public" {
+		t.Errorf("server/discover cacheScope = %v, want %q", got, "public")
+	}
+	if got := result["resultType"]; got != "complete" {
+		t.Errorf("server/discover resultType = %v, want %q", got, "complete")
+	}
+	versions, ok := result["supportedVersions"].([]any)
+	if !ok || len(versions) != 1 || versions[0] != config.ProtocolVersionStateless {
+		t.Errorf("server/discover supportedVersions = %v, want [%q]", result["supportedVersions"], config.ProtocolVersionStateless)
+	}
+	if _, ok := result["ttlMs"]; !ok {
+		t.Error("server/discover result missing required ttlMs field")
+	}
+	if _, present := result["protocolVersion"]; present {
+		t.Error("server/discover result must not carry protocolVersion — that's an initialize-only field")
 	}
 }
 
@@ -215,5 +230,59 @@ func TestToolsCallStatelessBackendNoSessionReuse(t *testing.T) {
 	}
 	if fb.sessionCount() != 0 {
 		t.Errorf("stateless backend must never issue/track a session, got %d sessions", fb.sessionCount())
+	}
+}
+
+// --- SEP-2575 "resultType" (and friends) on every locally-synthesized Result ---
+//
+// A 2026-07-28-negotiating client (e.g. hermes-agent's mcp==2.0.0 SDK, once it
+// falls back from initialize to server/discover) validates every subsequent
+// response against the strict v2026_07_28 Result models, which require
+// "resultType" on every result and additionally "cacheScope"/"ttlMs" on
+// ListToolsResult — verified directly against modelcontextprotocol's real
+// mcp_types package, not guessed. A response missing these is a client-side
+// pydantic ValidationError, not a graceful ignore.
+
+func TestToolsListStatelessIncludesRequiredFields(t *testing.T) {
+	fb := newStatelessFakeBackend(t, "grafana-stateless")
+	h := harness(t, []config.BackendConfig{statelessBackendCfg(fb, "grafana-stateless")})
+
+	w := rpc(h, "tools/list", nil, token(t, "grafana-stateless-team"), "")
+	result := decodeResult(t, w)["result"].(map[string]any)
+	if got := result["resultType"]; got != "complete" {
+		t.Errorf("tools/list resultType = %v, want %q", got, "complete")
+	}
+	if got := result["cacheScope"]; got != "private" {
+		t.Errorf("tools/list cacheScope = %v, want %q", got, "private")
+	}
+	if _, ok := result["ttlMs"]; !ok {
+		t.Error("tools/list result missing required ttlMs field")
+	}
+}
+
+func TestToolsListStatefulOmitsSEP2575Fields(t *testing.T) {
+	fb := newFakeBackend(t, "grafana-stateful")
+	h := harness(t, []config.BackendConfig{{
+		Name: "grafana-stateful", URL: fb.url(),
+		Tenants: []config.TenantConfig{{ID: "team-a", Groups: []string{"team-a"}}},
+	}})
+	sid := initSession(h)
+
+	w := rpc(h, "tools/list", nil, token(t, "team-a"), sid)
+	result := decodeResult(t, w)["result"].(map[string]any)
+	if _, present := result["resultType"]; present {
+		t.Error("a legacy (2025-03-26) deployment must not stamp resultType on tools/list")
+	}
+}
+
+func TestListInstancesStatelessIncludesResultType(t *testing.T) {
+	fb := newStatelessFakeBackend(t, "grafana-stateless")
+	h := harness(t, []config.BackendConfig{statelessBackendCfg(fb, "grafana-stateless")})
+
+	w := rpc(h, "tools/call", map[string]any{"name": listInstancesTool, "arguments": map[string]any{}},
+		token(t, "grafana-stateless-team"), "")
+	result := decodeResult(t, w)["result"].(map[string]any)
+	if got := result["resultType"]; got != "complete" {
+		t.Errorf("list_instances resultType = %v, want %q", got, "complete")
 	}
 }
