@@ -122,6 +122,26 @@ func stripTenantArg(params json.RawMessage) (json.RawMessage, error) {
 	return compactJSON(p), nil
 }
 
+// statelessClientMeta is the client identity/capabilities the 2026-07-28
+// stateless revision expects in every request's "_meta", replacing the
+// clientInfo/capabilities that used to be declared once via initialize.
+var statelessClientMeta = map[string]any{
+	"clientInfo":   map[string]any{"name": "mt-mcp-proxy", "version": "0"},
+	"capabilities": map[string]any{},
+}
+
+// injectMeta merges the stateless client identity into a params object's
+// "_meta" key, preserving any sibling fields (e.g. tools/call's name/arguments).
+// A nil/empty params becomes a fresh object carrying only "_meta".
+func injectMeta(params json.RawMessage) json.RawMessage {
+	p := map[string]json.RawMessage{}
+	if len(params) > 0 {
+		_ = json.Unmarshal(params, &p)
+	}
+	p["_meta"] = compactJSON(statelessClientMeta)
+	return compactJSON(p)
+}
+
 func contains(ss []string, v string) bool {
 	for _, s := range ss {
 		if s == v {

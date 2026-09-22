@@ -11,8 +11,21 @@ import (
 	"strings"
 )
 
-// mcpSessionHeader is the streamable-HTTP session header.
+// mcpSessionHeader is the streamable-HTTP session header (stateful revisions).
 const mcpSessionHeader = "Mcp-Session-Id"
+
+// Headers used by the 2026-07-28 stateless revision: every request is
+// self-contained, so the protocol version and routing info travel on the
+// request itself rather than being pinned to a session.
+const (
+	// mcpProtocolVersionHeader carries the MCP revision on every request.
+	mcpProtocolVersionHeader = "MCP-Protocol-Version"
+	// mcpMethodHeader mirrors the JSON-RPC method so gateways can route/authorize
+	// on headers without parsing the body.
+	mcpMethodHeader = "Mcp-Method"
+	// mcpNameHeader carries the tool name for tools/call requests.
+	mcpNameHeader = "Mcp-Name"
+)
 
 // jsonRPCRequest is an incoming JSON-RPC request. ID is kept as RawMessage to
 // preserve numeric/string fidelity when echoing it back.

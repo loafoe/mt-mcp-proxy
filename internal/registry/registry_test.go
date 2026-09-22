@@ -143,3 +143,58 @@ func TestReferenceCredentialPrefersBackendDefault(t *testing.T) {
 		t.Errorf("expected backend default backend-sa, got %q", got)
 	}
 }
+
+func TestBackendStatelessDefaultsFalse(t *testing.T) {
+	r, err := New(testBackends())
+	if err != nil {
+		t.Fatal(err)
+	}
+	tn, _ := r.ResolveTenant("team-c")
+	if tn.Backend.Stateless() {
+		t.Error("a backend with no protocol_version must default to stateful")
+	}
+}
+
+func TestAllStatelessFalseWhenAnyBackendStateful(t *testing.T) {
+	r, err := New([]config.BackendConfig{
+		{Name: "a", URL: "http://a/mcp", ProtocolVersion: config.ProtocolVersionStateless,
+			Tenants: []config.TenantConfig{{ID: "x", Groups: []string{"x"}}}},
+		{Name: "b", URL: "http://b/mcp", // defaults to stateful
+			Tenants: []config.TenantConfig{{ID: "y", Groups: []string{"y"}}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.AllStateless() {
+		t.Error("AllStateless must be false when any backend is stateful")
+	}
+}
+
+func TestAllStatelessTrueWhenEveryBackendStateless(t *testing.T) {
+	r, err := New([]config.BackendConfig{
+		{Name: "a", URL: "http://a/mcp", ProtocolVersion: config.ProtocolVersionStateless,
+			Tenants: []config.TenantConfig{{ID: "x", Groups: []string{"x"}}}},
+		{Name: "b", URL: "http://b/mcp", ProtocolVersion: config.ProtocolVersionStateless,
+			Tenants: []config.TenantConfig{{ID: "y", Groups: []string{"y"}}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !r.AllStateless() {
+		t.Error("AllStateless must be true when every backend is stateless")
+	}
+}
+
+func TestBackendStatelessWhenConfigured(t *testing.T) {
+	r, err := New([]config.BackendConfig{
+		{Name: "grafana-stateless", URL: "http://g:8000/mcp", ProtocolVersion: config.ProtocolVersionStateless,
+			Tenants: []config.TenantConfig{{ID: "team-a", Groups: []string{"team-a"}}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tn, _ := r.ResolveTenant("team-a")
+	if !tn.Backend.Stateless() {
+		t.Error("protocol_version: 2026-07-28 should make the backend stateless")
+	}
+}

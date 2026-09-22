@@ -14,20 +14,28 @@ import (
 )
 
 // fakeBackend is a minimal mcp-grafana stand-in implementing streamable-HTTP:
-// initialize (issues a session id), tools/list, tools/call, and DELETE.
+// initialize (issues a session id), tools/list, tools/call, and DELETE. Set
+// stateless to true to emulate a 2026-07-28 backend instead: initialize is
+// never expected, Mcp-Session-Id is never issued/read, and every request must
+// carry the stateless routing headers.
 type fakeBackend struct {
 	name      string
 	server    *httptest.Server
 	sse       bool // answer tools/list as text/event-stream when true
+	stateless bool // emulate the 2026-07-28 stateless revision
 	toolNames []string
 
-	mu           sync.Mutex
-	sessionsSeen map[string]int    // backend session id -> request count
-	lastAuth     string            // Authorization header on last tools/call
-	lastHeaders  map[string]string // all headers on last tools/call
-	lastCallArgs json.RawMessage   // arguments on last tools/call
-	deletedSID   string            // session id seen on DELETE
-	initCount    int
+	mu             sync.Mutex
+	sessionsSeen   map[string]int    // backend session id -> request count
+	lastAuth       string            // Authorization header on last tools/call
+	lastHeaders    map[string]string // all headers on last request
+	lastCallArgs   json.RawMessage   // arguments on last tools/call
+	lastParams     json.RawMessage   // raw params on last request (any method)
+	deletedSID     string            // session id seen on DELETE
+	initCount      int
+	statelessCalls int // requests seen while in stateless mode
+	sawSessionID   bool
+	sawInitialize  bool
 }
 
 func newFakeBackend(t *testing.T, name string, toolNames ...string) *fakeBackend {
@@ -45,6 +53,13 @@ func newFakeBackend(t *testing.T, name string, toolNames ...string) *fakeBackend
 	return fb
 }
 
+// newStatelessFakeBackend is newFakeBackend for a 2026-07-28 stateless backend.
+func newStatelessFakeBackend(t *testing.T, name string, toolNames ...string) *fakeBackend {
+	fb := newFakeBackend(t, name, toolNames...)
+	fb.stateless = true
+	return fb
+}
+
 func (fb *fakeBackend) url() string { return fb.server.URL + "/mcp" }
 
 func (fb *fakeBackend) handle(w http.ResponseWriter, r *http.Request) {
@@ -59,6 +74,23 @@ func (fb *fakeBackend) handle(w http.ResponseWriter, r *http.Request) {
 	body, _ := io.ReadAll(r.Body)
 	var req jsonRPCRequest
 	_ = json.Unmarshal(body, &req)
+
+	fb.mu.Lock()
+	if r.Header.Get(mcpSessionHeader) != "" {
+		fb.sawSessionID = true
+	}
+	if req.Method == "initialize" {
+		fb.sawInitialize = true
+	}
+	if fb.stateless {
+		fb.statelessCalls++
+	}
+	fb.lastParams = req.Params
+	fb.lastHeaders = map[string]string{}
+	for k := range r.Header {
+		fb.lastHeaders[k] = r.Header.Get(k)
+	}
+	fb.mu.Unlock()
 
 	switch req.Method {
 	case "initialize":
@@ -100,7 +132,9 @@ func (fb *fakeBackend) handle(w http.ResponseWriter, r *http.Request) {
 	case "tools/call":
 		sid := r.Header.Get(mcpSessionHeader)
 		fb.mu.Lock()
-		fb.sessionsSeen[sid]++
+		if sid != "" {
+			fb.sessionsSeen[sid]++
+		}
 		fb.lastAuth = r.Header.Get("Authorization")
 		fb.lastHeaders = map[string]string{}
 		for k := range r.Header {
@@ -132,5 +166,33 @@ func (fb *fakeBackend) callsOnSession(sid string) int {
 func (fb *fakeBackend) header(name string) string {
 	fb.mu.Lock()
 	defer fb.mu.Unlock()
-	return fb.lastHeaders[name]
+	return fb.lastHeaders[http.CanonicalHeaderKey(name)]
+}
+
+// sessionIDEverSeen reports whether any request carried Mcp-Session-Id.
+func (fb *fakeBackend) sessionIDEverSeen() bool {
+	fb.mu.Lock()
+	defer fb.mu.Unlock()
+	return fb.sawSessionID
+}
+
+// initializeEverSeen reports whether an "initialize" request was ever received.
+func (fb *fakeBackend) initializeEverSeen() bool {
+	fb.mu.Lock()
+	defer fb.mu.Unlock()
+	return fb.sawInitialize
+}
+
+// requestCount returns the number of requests handled (any method).
+func (fb *fakeBackend) requestCount() int {
+	fb.mu.Lock()
+	defer fb.mu.Unlock()
+	return fb.statelessCalls
+}
+
+// params returns the raw params object of the last request received.
+func (fb *fakeBackend) params() json.RawMessage {
+	fb.mu.Lock()
+	defer fb.mu.Unlock()
+	return fb.lastParams
 }

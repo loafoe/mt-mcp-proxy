@@ -96,10 +96,23 @@ type BackendConfig struct {
 	// in YAML (credential_scheme: "") for a bare token, e.g. with an X-Api-Key
 	// header. A pointer distinguishes "unset" (→ Bearer) from "explicitly empty".
 	CredentialScheme *string `yaml:"credential_scheme"`
+	// ProtocolVersion selects the MCP revision spoken toward this backend.
+	// Defaults to "2025-03-26" (stateful: initialize handshake + Mcp-Session-Id).
+	// Set to "2026-07-28" for a backend that speaks the stateless revision: the
+	// proxy skips initialize entirely and sends every request self-contained
+	// (MCP-Protocol-Version + Mcp-Method/Mcp-Name headers, no session id).
+	ProtocolVersion string `yaml:"protocol_version"`
 	// Tenants are the selectable units this backend serves. A backend declares
 	// one or more.
 	Tenants []TenantConfig `yaml:"tenants"`
 }
+
+// ProtocolVersionStateful is the default, session-based MCP revision.
+const ProtocolVersionStateful = "2025-03-26"
+
+// ProtocolVersionStateless is the stateless MCP revision: no initialize
+// handshake, no Mcp-Session-Id, every request self-contained.
+const ProtocolVersionStateless = "2026-07-28"
 
 // TenantConfig is a selectable tenant served by a backend.
 //
@@ -226,6 +239,9 @@ func (c *Config) applyDefaults() {
 			def := "Bearer"
 			b.CredentialScheme = &def
 		}
+		if b.ProtocolVersion == "" {
+			b.ProtocolVersion = ProtocolVersionStateful
+		}
 	}
 	if c.Observability.MetricsListen == "" {
 		c.Observability.MetricsListen = ":9090"
@@ -271,6 +287,9 @@ func (c *Config) Validate() error {
 		names[b.Name] = true
 		if b.URL == "" {
 			return fmt.Errorf("backend %q: url is required", b.Name)
+		}
+		if b.ProtocolVersion != ProtocolVersionStateful && b.ProtocolVersion != ProtocolVersionStateless {
+			return fmt.Errorf("backend %q: protocol_version must be %q or %q, got %q", b.Name, ProtocolVersionStateful, ProtocolVersionStateless, b.ProtocolVersion)
 		}
 		if len(b.Tenants) == 0 {
 			return fmt.Errorf("backend %q: at least one tenant is required", b.Name)

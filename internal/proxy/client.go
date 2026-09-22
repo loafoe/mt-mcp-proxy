@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/loafoe/mt-mcp-proxy/internal/config"
 	"github.com/loafoe/mt-mcp-proxy/internal/registry"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -25,6 +26,10 @@ type backendClient struct {
 	backend *registry.Backend
 	http    *http.Client
 	tracer  trace.Tracer
+	// stateless mirrors backend.Stateless(): the 2026-07-28 revision, where
+	// every request is self-contained (no initialize handshake, no
+	// Mcp-Session-Id — protocol version and routing travel as headers instead).
+	stateless bool
 }
 
 func newBackendClient(b *registry.Backend) *backendClient {
@@ -33,7 +38,8 @@ func newBackendClient(b *registry.Backend) *backendClient {
 		http: &http.Client{
 			Timeout: 60 * time.Second,
 		},
-		tracer: noop.NewTracerProvider().Tracer("mt-mcp-proxy"),
+		tracer:    noop.NewTracerProvider().Tracer("mt-mcp-proxy"),
+		stateless: b.Stateless(),
 	}
 }
 
@@ -60,8 +66,10 @@ func (c *backendClient) applyAuth(req *http.Request, credential string, extra ma
 
 // post sends a JSON-RPC payload and returns the decoded first message plus the
 // backend session id from the response (if any). credential is injected via
-// applyAuth on every request.
-func (c *backendClient) post(ctx context.Context, payload []byte, sessionID, credential string, extra map[string]string) (body []byte, respSessionID string, err error) {
+// applyAuth on every request. mcpMethod/mcpName are only used in stateless mode
+// (see backendClient.stateless): they carry the routing headers that replace
+// the session id, so a gateway can route/authorize without parsing the body.
+func (c *backendClient) post(ctx context.Context, payload []byte, sessionID, credential string, extra map[string]string, mcpMethod, mcpName string) (body []byte, respSessionID string, err error) {
 	// Span around the downstream call. When tracing is disabled this is a no-op
 	// span, but the propagator below still injects an empty (valid) context.
 	ctx, span := c.tracer.Start(ctx, "mcp.backend.call")
@@ -75,7 +83,15 @@ func (c *backendClient) post(ctx context.Context, payload []byte, sessionID, cre
 	req.Header.Set("Content-Type", "application/json")
 	// Accept both response framings; backends may stream via SSE.
 	req.Header.Set("Accept", "application/json, text/event-stream")
-	if sessionID != "" {
+	if c.stateless {
+		req.Header.Set(mcpProtocolVersionHeader, config.ProtocolVersionStateless)
+		if mcpMethod != "" {
+			req.Header.Set(mcpMethodHeader, mcpMethod)
+		}
+		if mcpName != "" {
+			req.Header.Set(mcpNameHeader, mcpName)
+		}
+	} else if sessionID != "" {
 		req.Header.Set(mcpSessionHeader, sessionID)
 	}
 	c.applyAuth(req, credential, extra)
@@ -110,7 +126,7 @@ func (c *backendClient) initialize(ctx context.Context, initParams json.RawMessa
 		Params:  initParams,
 		ID:      json.RawMessage(`1`),
 	})
-	body, sid, err := c.post(ctx, payload, "", credential, nil)
+	body, sid, err := c.post(ctx, payload, "", credential, nil, "initialize", "")
 	if err != nil {
 		return "", nil, err
 	}
@@ -134,17 +150,22 @@ func (c *backendClient) notifyInitialized(ctx context.Context, sessionID, creden
 		Method:  "notifications/initialized",
 	})
 	// Best-effort; ignore errors/notification responses.
-	_, _, _ = c.post(ctx, payload, sessionID, credential, nil)
+	_, _, _ = c.post(ctx, payload, sessionID, credential, nil, "notifications/initialized", "")
 }
 
-// listTools fetches the backend's tool catalog.
+// listTools fetches the backend's tool catalog. In stateless mode there is no
+// prior initialize/session, so the request carries client identity in "_meta".
 func (c *backendClient) listTools(ctx context.Context, sessionID, credential string) ([]rawTool, error) {
-	payload, _ := json.Marshal(jsonRPCRequest{
+	req := jsonRPCRequest{
 		JSONRPC: "2.0",
 		Method:  "tools/list",
 		ID:      json.RawMessage(`2`),
-	})
-	body, _, err := c.post(ctx, payload, sessionID, credential, nil)
+	}
+	if c.stateless {
+		req.Params = injectMeta(nil)
+	}
+	payload, _ := json.Marshal(req)
+	body, _, err := c.post(ctx, payload, sessionID, credential, nil, "tools/list", "")
 	if err != nil {
 		return nil, err
 	}
@@ -162,9 +183,22 @@ func (c *backendClient) listTools(ctx context.Context, sessionID, credential str
 }
 
 // callTool forwards a tools/call to the backend on the given session, injecting
-// per-request tenant headers. It returns the raw JSON-RPC response bytes.
-func (c *backendClient) callTool(ctx context.Context, sessionID, credential string, reqBytes []byte, tenantHeaders map[string]string) ([]byte, error) {
-	body, _, err := c.post(ctx, reqBytes, sessionID, credential, tenantHeaders)
+// per-request tenant headers. toolName drives the stateless Mcp-Name routing
+// header (ignored in stateful mode). It returns the raw JSON-RPC response bytes.
+func (c *backendClient) callTool(ctx context.Context, sessionID, credential string, reqBytes []byte, tenantHeaders map[string]string, toolName string) ([]byte, error) {
+	if c.stateless {
+		var req jsonRPCRequest
+		if err := json.Unmarshal(reqBytes, &req); err != nil {
+			return nil, fmt.Errorf("backend %q: bad tools/call request: %w", c.backend.Name, err)
+		}
+		req.Params = injectMeta(req.Params)
+		var err error
+		reqBytes, err = json.Marshal(req)
+		if err != nil {
+			return nil, err
+		}
+	}
+	body, _, err := c.post(ctx, reqBytes, sessionID, credential, tenantHeaders, "tools/call", toolName)
 	if err != nil {
 		return nil, err
 	}

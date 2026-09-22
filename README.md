@@ -127,13 +127,64 @@ Because the session map is in-memory:
 - **Restart:** sessions are dropped; the client re-runs `initialize`.
 - `DELETE` on the endpoint tears down the client session and its backend sessions.
 
+## Stateless backends (spec 2026-07-28)
+
+A backend can opt into the **2026-07-28 stateless revision** instead of the
+default 2025-03-26 session-based one:
+
+```yaml
+backends:
+  - name: grafana-stateless
+    url: http://mcp-grafana:8000/mcp
+    protocol_version: "2026-07-28"   # default: "2025-03-26"
+    credential: "${GRAFANA_SA_TOKEN}"
+    tenants:
+      - id: team-a
+        groups: [team-a]
+```
+
+For a stateless backend the proxy never calls `initialize` and never sends or
+tracks an `Mcp-Session-Id`: every `tools/list`/`tools/call` is a self-contained
+request carrying `MCP-Protocol-Version: 2026-07-28`, the `Mcp-Method`/`Mcp-Name`
+routing headers, and the proxy's client identity in the request's `_meta`. This
+also sidesteps the per-tenant backend session bookkeeping described above —
+there is nothing to lazily open or reuse.
+
+### Client-facing statelessness
+
+The proxy only goes stateless toward its **own** callers when **every**
+configured backend is stateless. The two modes cannot be mixed: a stateful
+backend's lazily-opened backend session is keyed off the client-facing
+`Mcp-Session-Id` (see [Sessions](#sessions)), so as long as even one backend
+still speaks 2025-03-26, the proxy must keep minting and requiring that session
+id from its callers too.
+
+When every backend is `protocol_version: "2026-07-28"`:
+
+- `initialize` answers with `protocolVersion: "2026-07-28"` and **does not**
+  mint or return an `Mcp-Session-Id` — there is nothing to key.
+- Every response carries `MCP-Protocol-Version: 2026-07-28`.
+- `initialize` itself becomes optional: `tools/list` and `tools/call` never
+  required a prior session, so a stateless-aware client can skip straight to
+  them.
+- The optional `server/discover` RPC answers with the same capability info as
+  `initialize`, with no session side effect, for clients that want to discover
+  capabilities upfront without running the handshake at all.
+- `DELETE` is a no-op (`204`) — there is no client-facing session to tear down.
+
+Mixing revisions (some backends stateful, some stateless) is fully supported —
+each backend is routed per its own `protocol_version` — but in that case the
+client-facing side stays on the default 2025-03-26 session-based contract.
+
 ## Transport
 
-This proxy targets MCP **streamable HTTP** (spec 2025-03-26). A single endpoint
+This proxy targets MCP **streamable HTTP** (spec 2025-03-26 by default, or the
+stateless 2026-07-28 revision per backend — see above). A single endpoint
 handles `POST` (JSON-RPC, answered as `application/json` *or* a streamed
 `text/event-stream`), optional `GET` (server→client stream), and `DELETE`
-(session end). The proxy answers `initialize`/`ping`/`tools/list` locally and
-forwards `tools/call` to the selected tenant's backend.
+(session end). The proxy answers `initialize`/`ping`/`tools/list`/
+`server/discover` locally and forwards `tools/call` to the selected tenant's
+backend.
 
 > **stdio backends** (a downstream MCP server that only speaks stdio, requiring a
 > subprocess per credential) are **not** supported in this version — this is

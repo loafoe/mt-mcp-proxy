@@ -106,12 +106,22 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 2026-07-28: when every backend is stateless, the proxy itself speaks the
+	// stateless revision toward its own callers too — stamp every response with
+	// the header so a stateless-aware client can confirm it without calling
+	// initialize first.
+	if h.Registry.AllStateless() {
+		w.Header().Set(mcpProtocolVersionHeader, config.ProtocolVersionStateless)
+	}
+
 	switch req.Method {
 	case "initialize":
 		h.handleInitialize(w, r, &req)
 	case "notifications/initialized":
 		// Client handshake completion; proxy-local, nothing downstream.
 		w.WriteHeader(http.StatusAccepted)
+	case "server/discover":
+		h.handleDiscover(w, &req)
 	case "tools/list":
 		h.handleToolsList(w, r, &req)
 	case "tools/call":
@@ -130,19 +140,52 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleInitialize answers as the proxy itself and mints a proxySID. No JWT is
-// required (discovery is decoupled from auth).
-func (h *Handler) handleInitialize(w http.ResponseWriter, r *http.Request, req *jsonRPCRequest) {
-	sess := h.Sessions.Mint()
-	h.Obs.RecordSession(r.Context())
-	result := map[string]any{
-		"protocolVersion": "2025-03-26",
+// serverInfoResult is the capability info the proxy advertises as an MCP
+// server, shared by "initialize" and the stateless "server/discover" RPC. The
+// advertised protocolVersion tracks whether every backend is stateless: the
+// proxy can only be stateless toward its own callers when it never needs a
+// client-facing session to key a stateful backend session off of.
+func (h *Handler) serverInfoResult() map[string]any {
+	protocolVersion := config.ProtocolVersionStateful
+	if h.Registry.AllStateless() {
+		protocolVersion = config.ProtocolVersionStateless
+	}
+	return map[string]any{
+		"protocolVersion": protocolVersion,
 		"capabilities":    map[string]any{"tools": map[string]any{"listChanged": false}},
 		"serverInfo":      map[string]any{"name": "mt-mcp-proxy", "version": "0"},
 	}
-	w.Header().Set(mcpSessionHeader, sess.ID)
+}
+
+// handleInitialize answers as the proxy itself. No JWT is required (discovery
+// is decoupled from auth).
+//
+// When every backend is stateless (config.ProtocolVersionStateless), the proxy
+// never mints a proxySID or sets Mcp-Session-Id: per the 2026-07-28 revision,
+// every subsequent request is self-contained, so there is nothing to key a
+// client-facing session on (tools/list and tools/call already do not require
+// one — see routeToBackend). Initialize itself becomes optional in this mode;
+// the proxy still answers it for clients that call it out of habit.
+func (h *Handler) handleInitialize(w http.ResponseWriter, r *http.Request, req *jsonRPCRequest) {
+	result := h.serverInfoResult()
 	w.Header().Set("Content-Type", "application/json")
+	if h.Registry.AllStateless() {
+		_ = writeJSONRPCResult(w, req.ID, result)
+		return
+	}
+	sess := h.Sessions.Mint()
+	h.Obs.RecordSession(r.Context())
+	w.Header().Set(mcpSessionHeader, sess.ID)
 	_ = writeJSONRPCResult(w, req.ID, result)
+}
+
+// handleDiscover answers the optional 2026-07-28 "server/discover" RPC: the
+// same capability info as initialize, with no session side effect. It lets a
+// stateless-aware client learn the proxy's capabilities upfront without
+// running the (now optional) initialize handshake.
+func (h *Handler) handleDiscover(w http.ResponseWriter, req *jsonRPCRequest) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = writeJSONRPCResult(w, req.ID, h.serverInfoResult())
 }
 
 // handleToolsList serves the cached catalog with the identity-hybrid transform.
@@ -276,7 +319,7 @@ func (h *Handler) handleToolsCall(w http.ResponseWriter, r *http.Request, req *j
 	forwardReq := jsonRPCRequest{JSONRPC: "2.0", Method: "tools/call", Params: cleanParams, ID: req.ID}
 	forwardBytes, _ := json.Marshal(forwardReq)
 
-	if !h.routeToBackend(w, r, req.ID, tenant, forwardBytes) {
+	if !h.routeToBackend(w, r, req.ID, tenant, forwardBytes, params.Name) {
 		out.ErrorType = "backend_error"
 	}
 }
@@ -307,10 +350,31 @@ func (h *Handler) selectTenant(args json.RawMessage, groups []string, authorized
 	}
 }
 
-// routeToBackend forwards a prepared tools/call to the tenant's backend over a
-// lazily-opened backend session, applying per-request tenant headers. It reports
-// whether the call succeeded (false on any backend/session failure).
-func (h *Handler) routeToBackend(w http.ResponseWriter, r *http.Request, id json.RawMessage, tenant *registry.Tenant, forwardBytes []byte) bool {
+// routeToBackend forwards a prepared tools/call to the tenant's backend,
+// applying per-request tenant headers. It reports whether the call succeeded
+// (false on any backend/session failure). toolName drives the stateless
+// Mcp-Name routing header.
+//
+// Stateless backends (config.ProtocolVersionStateless) skip the client-facing
+// proxySID lookup and the lazily-opened backend session entirely: every
+// request is self-contained, so there is nothing to key a backend session on.
+func (h *Handler) routeToBackend(w http.ResponseWriter, r *http.Request, id json.RawMessage, tenant *registry.Tenant, forwardBytes []byte, toolName string) bool {
+	client := h.backendClient(tenant.Backend)
+	cred := tenant.EffectiveCredential()
+
+	if tenant.Backend.Stateless() {
+		respBytes, err := client.callTool(r.Context(), "", cred, forwardBytes, tenant.Headers, toolName)
+		if err != nil {
+			h.Logger.Error("backend tools/call failed", "backend", tenant.Backend.Name, "err", err)
+			writeRPCError(w, id, -32003, "backend call failed")
+			return false
+		}
+		h.Logger.Debug("routed tool call (stateless)", "tenant", tenant.ID, "backend", tenant.Backend.Name)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(respBytes)
+		return true
+	}
+
 	proxySID := r.Header.Get(mcpSessionHeader)
 	sess, ok := h.Sessions.Get(proxySID)
 	if !ok {
@@ -318,8 +382,6 @@ func (h *Handler) routeToBackend(w http.ResponseWriter, r *http.Request, id json
 		return false
 	}
 
-	client := h.backendClient(tenant.Backend)
-	cred := tenant.EffectiveCredential()
 	// Key the backend session by tenant ID, not backend name: each tenant carries
 	// its own downstream credential, so two tenants sharing a backend must not
 	// share a session initialized with one tenant's credential.
@@ -340,7 +402,7 @@ func (h *Handler) routeToBackend(w http.ResponseWriter, r *http.Request, id json
 		h.Sessions.SetBackendSID(proxySID, tenant.ID, backendSID)
 	}
 
-	respBytes, err := client.callTool(r.Context(), backendSID, cred, forwardBytes, tenant.Headers)
+	respBytes, err := client.callTool(r.Context(), backendSID, cred, forwardBytes, tenant.Headers, toolName)
 	if err != nil {
 		h.Logger.Error("backend tools/call failed", "backend", tenant.Backend.Name, "err", err)
 		writeRPCError(w, id, -32003, "backend call failed")
@@ -353,8 +415,14 @@ func (h *Handler) routeToBackend(w http.ResponseWriter, r *http.Request, id json
 	return true
 }
 
-// handleDelete tears down the proxySID and its backend sessions.
+// handleDelete tears down the proxySID and its backend sessions. When every
+// backend is stateless there is no client-facing session to tear down (see
+// handleInitialize): DELETE is a no-op.
 func (h *Handler) handleDelete(w http.ResponseWriter, r *http.Request) {
+	if h.Registry.AllStateless() {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
 	proxySID := r.Header.Get(mcpSessionHeader)
 	if sess, ok := h.Sessions.Delete(proxySID); ok {
 		// Backend sessions are keyed by tenant ID (see routeToBackend). Tear down

@@ -57,12 +57,19 @@ func (c *catalog) get(ctx context.Context) ([]rawTool, error) {
 	return tools, nil
 }
 
-// fetch opens a short-lived MCP session to the reference backend and lists tools.
-// It authenticates with the backend's default credential so backends that gate
-// every request on a credential (e.g. github-mcp-server) still serve the catalog.
+// fetch lists tools from the reference backend. It authenticates with the
+// backend's default credential so backends that gate every request on a
+// credential (e.g. github-mcp-server) still serve the catalog.
+//
+// A stateful backend needs a short-lived MCP session opened first; a stateless
+// backend (config.ProtocolVersionStateless) has no initialize handshake at all —
+// tools/list is a self-contained request.
 func (c *catalog) fetch(ctx context.Context) ([]rawTool, error) {
 	client := newBackendClient(c.ref)
 	cred := c.cred
+	if c.ref.Stateless() {
+		return client.listTools(ctx, "", cred)
+	}
 	sid, _, err := client.initialize(ctx, defaultInitParams, cred)
 	if err != nil {
 		return nil, err

@@ -249,6 +249,52 @@ backends:
 	}
 }
 
+func TestProtocolVersionDefaultsToStateful(t *testing.T) {
+	c, err := Load(writeTemp(t, oneBackend))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if got := c.Backends[0].ProtocolVersion; got != ProtocolVersionStateful {
+		t.Errorf("protocol_version default = %q, want %q", got, ProtocolVersionStateful)
+	}
+}
+
+func TestProtocolVersionStatelessAccepted(t *testing.T) {
+	c, err := Load(writeTemp(t, `
+auth:
+  mode: insecure
+backends:
+  - name: a
+    url: http://a:8000/mcp
+    protocol_version: "2026-07-28"
+    tenants:
+      - id: team-a
+        groups: [team-a]
+`))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if got := c.Backends[0].ProtocolVersion; got != ProtocolVersionStateless {
+		t.Errorf("protocol_version = %q, want %q", got, ProtocolVersionStateless)
+	}
+}
+
+func TestProtocolVersionRejectsUnknown(t *testing.T) {
+	p := writeTemp(t, `
+auth:
+  mode: insecure
+backends:
+  - name: a
+    url: http://a/mcp
+    protocol_version: "2024-11-05"
+    tenants:
+      - {id: x, groups: [x]}
+`)
+	if _, err := Load(p); err == nil {
+		t.Fatal("expected error for unsupported protocol_version")
+	}
+}
+
 func TestValidateUnknownMode(t *testing.T) {
 	p := writeTemp(t, `
 auth:

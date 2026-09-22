@@ -84,3 +84,17 @@ backends:
 #       - id: team-b
 #         groups: [team-b]
 #         headers: { X-Grafana-Org-Id: "2" }
+
+# --- Alternative: a backend speaking the 2026-07-28 stateless revision ---
+# protocol_version defaults to "2025-03-26" (initialize handshake +
+# Mcp-Session-Id). Set it to "2026-07-28" for a backend that is stateless: the
+# proxy never calls initialize and every request is self-contained (no backend
+# session to open/track).
+# backends:
+#   - name: grafana-stateless
+#     url: http://mcp-grafana:8000/mcp
+#     protocol_version: "2026-07-28"
+#     credential: "${GRAFANA_SA_TOKEN}"
+#     tenants:
+#       - id: team-a
+#         groups: [team-a]

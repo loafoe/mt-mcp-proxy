@@ -33,6 +33,15 @@ type Backend struct {
 	// CredentialScheme is the scheme prefix for the credential value (default
 	// "Bearer"; may be empty for a bare token).
 	CredentialScheme string
+	// ProtocolVersion is the MCP revision spoken toward this backend: either
+	// config.ProtocolVersionStateful (default) or config.ProtocolVersionStateless.
+	ProtocolVersion string
+}
+
+// Stateless reports whether this backend speaks the 2026-07-28 stateless MCP
+// revision (no initialize handshake, no Mcp-Session-Id).
+func (b *Backend) Stateless() bool {
+	return b.ProtocolVersion == config.ProtocolVersionStateless
 }
 
 // Tenant is a selectable unit served by a backend.
@@ -87,6 +96,10 @@ func New(backends []config.BackendConfig) (*Registry, error) {
 		if header == "" {
 			header = "Authorization"
 		}
+		protocolVersion := bc.ProtocolVersion
+		if protocolVersion == "" {
+			protocolVersion = config.ProtocolVersionStateful
+		}
 		b := &Backend{
 			Name:             bc.Name,
 			URL:              u,
@@ -94,6 +107,7 @@ func New(backends []config.BackendConfig) (*Registry, error) {
 			Credential:       bc.Credential,
 			CredentialHeader: header,
 			CredentialScheme: scheme,
+			ProtocolVersion:  protocolVersion,
 		}
 		r.backends = append(r.backends, b)
 		if r.ref == nil {
@@ -149,6 +163,21 @@ func (r *Registry) ReferenceCredential() string {
 // Backends returns all backends in config order.
 func (r *Registry) Backends() []*Backend {
 	return r.backends
+}
+
+// AllStateless reports whether every configured backend speaks the 2026-07-28
+// stateless revision. Client-facing statelessness (no initialize handshake, no
+// Mcp-Session-Id toward the proxy's own callers) is only safe to advertise when
+// this holds: a stateful backend still needs the proxy's session store to key
+// its lazily-opened backend session, which in turn needs a client-facing
+// proxySID to hang that mapping off of.
+func (r *Registry) AllStateless() bool {
+	for _, b := range r.backends {
+		if !b.Stateless() {
+			return false
+		}
+	}
+	return len(r.backends) > 0
 }
 
 // Tenants returns all registered tenants (unordered).
