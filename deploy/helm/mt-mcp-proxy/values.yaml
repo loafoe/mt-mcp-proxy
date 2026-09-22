@@ -17,7 +17,7 @@ image:
   # -- Registry repository for the mt-mcp-proxy image
   repository: ghcr.io/loafoe/mt-mcp-proxy
   # -- Image tag (the release workflow publishes ghcr.io/loafoe/mt-mcp-proxy:<git-tag>)
-  tag: "v0.1.0"
+  tag: "v0.3.0"
   # -- Image pull policy
   pullPolicy: IfNotPresent
 
@@ -105,6 +105,11 @@ backends:
     # backend set e.g. credentialHeader: X-Api-Key and credentialScheme: "".
     credentialHeader: Authorization
     credentialScheme: Bearer
+    # -- MCP revision spoken toward this backend. Defaults to "2025-03-26"
+    # (stateful: initialize handshake + Mcp-Session-Id). Set to "2026-07-28"
+    # for a backend that speaks the stateless revision (e.g. github-mcp-server
+    # http >= v1.12.2) — the proxy then skips initialize entirely.
+    protocolVersion: ""
     # -- Optional static headers sent toward this backend on every request
     headers: {}
 

@@ -49,6 +49,9 @@ data:
         {{- end }}
         credential_header: "{{ .credentialHeader | default "Authorization" }}"
         credential_scheme: "{{ .credentialScheme | default "Bearer" }}"
+        {{- if .protocolVersion }}
+        protocol_version: "{{ .protocolVersion }}"
+        {{- end }}
         {{- with .headers }}
         headers:
           {{- range $k, $v := . }}
