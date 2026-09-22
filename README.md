@@ -146,9 +146,13 @@ backends:
 For a stateless backend the proxy never calls `initialize` and never sends or
 tracks an `Mcp-Session-Id`: every `tools/list`/`tools/call` is a self-contained
 request carrying `MCP-Protocol-Version: 2026-07-28`, the `Mcp-Method`/`Mcp-Name`
-routing headers, and the proxy's client identity in the request's `_meta`. This
-also sidesteps the per-tenant backend session bookkeeping described above —
-there is nothing to lazily open or reuse.
+routing headers, and the proxy's client identity in the request's `_meta`
+(`io.modelcontextprotocol/protocolVersion`, `clientInfo`, `clientCapabilities`
+— the namespaced SEP-2575 keys, matching `modelcontextprotocol/go-sdk`'s
+`MetaKeyProtocolVersion`/`MetaKeyClientInfo`/`MetaKeyClientCapabilities`, which
+is what `github-mcp-server http` (>= v1.12.2) reads back out). This also
+sidesteps the per-tenant backend session bookkeeping described above — there
+is nothing to lazily open or reuse.
 
 ### Client-facing statelessness
 

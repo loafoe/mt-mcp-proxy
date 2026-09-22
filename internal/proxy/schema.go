@@ -3,7 +3,23 @@
 
 package proxy
 
-import "encoding/json"
+import (
+	"encoding/json"
+
+	"github.com/loafoe/mt-mcp-proxy/internal/config"
+)
+
+// Per-request "_meta" field names for the >= 2026-07-28 protocol revision
+// (SEP-2575). These must match github.com/modelcontextprotocol/go-sdk's
+// MetaKeyProtocolVersion/MetaKeyClientInfo/MetaKeyClientCapabilities exactly —
+// a stateless backend built on that SDK (e.g. github-mcp-server) reads these
+// bare, unnamespaced keys back out of params["_meta"] and silently treats a
+// mismatch as "unknown", not an error.
+const (
+	metaKeyProtocolVersion    = "io.modelcontextprotocol/protocolVersion"
+	metaKeyClientInfo         = "io.modelcontextprotocol/clientInfo"
+	metaKeyClientCapabilities = "io.modelcontextprotocol/clientCapabilities"
+)
 
 // cloneTool deep-copies a rawTool so per-caller schema mutation never corrupts
 // the shared cached catalog.
@@ -124,10 +140,12 @@ func stripTenantArg(params json.RawMessage) (json.RawMessage, error) {
 
 // statelessClientMeta is the client identity/capabilities the 2026-07-28
 // stateless revision expects in every request's "_meta", replacing the
-// clientInfo/capabilities that used to be declared once via initialize.
+// protocolVersion/clientInfo/capabilities that used to be declared once via
+// initialize.
 var statelessClientMeta = map[string]any{
-	"clientInfo":   map[string]any{"name": "mt-mcp-proxy", "version": "0"},
-	"capabilities": map[string]any{},
+	metaKeyProtocolVersion:    config.ProtocolVersionStateless,
+	metaKeyClientInfo:         map[string]any{"name": "mt-mcp-proxy", "version": "0"},
+	metaKeyClientCapabilities: map[string]any{},
 }
 
 // injectMeta merges the stateless client identity into a params object's

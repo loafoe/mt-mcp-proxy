@@ -184,8 +184,17 @@ func TestToolsCallStatelessBackendSkipsSession(t *testing.T) {
 	if got := fb.header(mcpNameHeader); got != "query_prometheus" {
 		t.Errorf("Mcp-Name header = %q, want query_prometheus", got)
 	}
-	if !strings.Contains(string(fb.params()), `"_meta"`) {
-		t.Errorf("stateless request params should carry client identity in _meta, got %s", fb.params())
+	// Must match go-sdk's namespaced MetaKey* constants exactly (SEP-2575) —
+	// github-mcp-server reads these bare, unprefixed keys back out of
+	// params["_meta"] and silently treats an unnamespaced key as absent.
+	if !strings.Contains(string(fb.params()), `"io.modelcontextprotocol/protocolVersion":"2026-07-28"`) {
+		t.Errorf("stateless request _meta should carry the namespaced protocolVersion key, got %s", fb.params())
+	}
+	if !strings.Contains(string(fb.params()), `"io.modelcontextprotocol/clientInfo"`) {
+		t.Errorf("stateless request _meta should carry the namespaced clientInfo key, got %s", fb.params())
+	}
+	if !strings.Contains(string(fb.params()), `"io.modelcontextprotocol/clientCapabilities"`) {
+		t.Errorf("stateless request _meta should carry the namespaced clientCapabilities key, got %s", fb.params())
 	}
 }
 
