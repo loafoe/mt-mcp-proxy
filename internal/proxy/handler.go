@@ -4,6 +4,7 @@
 package proxy
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -374,6 +375,25 @@ func (h *Handler) handleToolsCall(w http.ResponseWriter, r *http.Request, req *j
 	if !h.routeToBackend(w, r, req.ID, tenant, forwardBytes, params.Name, paramHeaders) {
 		out.ErrorType = "backend_error"
 	}
+}
+
+// WarmCatalog fetches and caches the tool catalog once. paramHeadersForCall
+// deliberately only ever reads whatever is already cached (never fetching as
+// a tools/call side effect — see its own doc comment), so on a freshly
+// started process the cache is cold until something warms it. A real MCP
+// client does not reliably re-issue tools/list against a brand new pod: it
+// may already hold the tool list from a long-lived session/cache predating
+// the restart and go straight to tools/call. That gap caused a live
+// incident (2026-09-23 08:04 UTC): a proxy pod restarted at 07:29, nothing
+// ever called tools/list against it, and the first real tools/call 34
+// minutes later silently got no SEP-2243 headers and failed against
+// github-mcp-server's enforcement. Callers (main.go) should call this once
+// at startup, before accepting traffic, and retry on failure until it
+// succeeds — the catalog's own TTL/staleness handling takes over after the
+// first successful fetch.
+func (h *Handler) WarmCatalog(ctx context.Context) error {
+	_, err := h.Catalog.get(ctx)
+	return err
 }
 
 // paramHeadersForCall looks up toolName in the cached catalog and, per

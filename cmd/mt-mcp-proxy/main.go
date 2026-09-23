@@ -83,6 +83,8 @@ func run(configPath string, logger *slog.Logger) error {
 	cat := proxy.NewCatalog(reg.ReferenceBackend(), reg.ReferenceCredential(), 5*time.Minute)
 	h := proxy.NewHandler(verifier, reg, store, cat, logger, obs, cfg.Server, cfg.Auth)
 
+	warmCatalog(ctx, h, logger)
+
 	healthz := func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
@@ -135,4 +137,43 @@ func run(configPath string, logger *slog.Logger) error {
 		return err
 	}
 	return nil
+}
+
+// warmCatalog fetches the tool catalog once before the caller starts serving
+// traffic, so the very first tools/call after a fresh start already has
+// SEP-2243 Mcp-Param-* header data available (see Handler.WarmCatalog's doc
+// comment for why this matters — a real MCP client does not reliably
+// re-issue tools/list against a brand new pod). Blocks startup for at most
+// 10s; if the backend isn't reachable yet, logs a warning and keeps retrying
+// every 10s in the background rather than blocking startup indefinitely —
+// availability of the rest of the proxy matters more than this one feature.
+func warmCatalog(ctx context.Context, h *proxy.Handler, logger *slog.Logger) {
+	warmCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	err := h.WarmCatalog(warmCtx)
+	cancel()
+	if err == nil {
+		logger.Info("catalog warmed at startup")
+		return
+	}
+	logger.Warn("catalog warmup failed at startup; tools/call may miss SEP-2243 headers until this succeeds", "err", err)
+
+	go func() {
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				fetchCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+				err := h.WarmCatalog(fetchCtx)
+				cancel()
+				if err == nil {
+					logger.Info("catalog warmup succeeded")
+					return
+				}
+				logger.Warn("catalog warmup retry failed", "err", err)
+			}
+		}
+	}()
 }

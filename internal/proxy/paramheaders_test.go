@@ -4,6 +4,7 @@
 package proxy
 
 import (
+	"context"
 	"encoding/base64"
 	"testing"
 
@@ -174,6 +175,43 @@ func TestToolsCallSkipsParamHeadersOnColdCatalog(t *testing.T) {
 	}
 	if got := fb.header("Mcp-Param-owner"); got != "" {
 		t.Errorf("Mcp-Param-owner header = %q, want none (catalog was never warmed)", got)
+	}
+}
+
+// This is the regression test for the 2026-09-23 08:04 UTC recurrence: a
+// proxy pod restarted, nothing ever called tools/list against it (the real
+// caller's own MCP client had cached the tool list from a session predating
+// the restart), and the first real tools/call 34 minutes later silently got
+// no SEP-2243 headers and failed. WarmCatalog is what main.go now calls once
+// at startup, before accepting traffic, specifically to close this gap —
+// prove that after it runs, even a tools/call with zero prior tools/list
+// (exactly the production sequence) gets its headers.
+func TestWarmCatalogClosesColdStartGap(t *testing.T) {
+	fb := newStatelessFakeBackend(t, "github", "list_issues")
+	fb.toolSchemas = map[string]string{"list_issues": githubOwnerRepoSchema}
+	fb.enforceParamHeaders = true
+	h := harness(t, []config.BackendConfig{githubBackendCfg(fb, "github")})
+
+	if err := h.WarmCatalog(context.Background()); err != nil {
+		t.Fatalf("WarmCatalog: %v", err)
+	}
+
+	// No tools/list call anywhere above — this mirrors the production
+	// sequence exactly: startup warmup, then straight to a cold tools/call.
+	w := rpc(h, "tools/call", map[string]any{
+		"name":      "list_issues",
+		"arguments": map[string]any{"owner": "philips-internal", "repo": "dip-ai"},
+	}, token(t, "github-team"), "")
+
+	resp := decodeResult(t, w)
+	if errObj, isErr := resp["error"]; isErr {
+		t.Fatalf("tools/call rejected by backend header enforcement even after WarmCatalog: %v (body=%s)", errObj, w.Body.String())
+	}
+	if got := fb.header("Mcp-Param-owner"); got != "philips-internal" {
+		t.Errorf("Mcp-Param-owner header = %q, want %q", got, "philips-internal")
+	}
+	if got := fb.header("Mcp-Param-repo"); got != "dip-ai" {
+		t.Errorf("Mcp-Param-repo header = %q, want %q", got, "dip-ai")
 	}
 }
 
