@@ -1,4 +1,4 @@
-# GEMINI.md — Project guide
+# AGENTS.md — Project guide
 
 **`mt-mcp-proxy`** is a generic multi-tenant JWT/OIDC auth gateway that fronts any
 unmodified MCP server speaking the **streamable-HTTP** transport (e.g.
