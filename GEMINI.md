@@ -28,7 +28,8 @@ backend is the downstream MCP server.
 - `internal/proxy` — MCP server+client: initialize, cached tools/list, tools/call
   routing and credential injection.
 - `internal/observability` — OTel metrics + traces, traceparent propagation.
-- `deploy/` — Dockerfile, docker-compose example, Helm chart (`helm/mt-mcp-proxy`).
+- `deploy/` — Dockerfile, docker-compose example. The Helm chart lives in the
+  separate `loafoe/helm-charts` repo (`charts/mt-mcp-proxy`), not here.
 
 ## Conventions
 
@@ -44,5 +45,5 @@ backend is the downstream MCP server.
 ```sh
 go build ./cmd/mt-mcp-proxy
 go test ./...
-helm lint deploy/helm/mt-mcp-proxy
+helm lint /Users/andy/DEV/Personal/helm-charts/charts/mt-mcp-proxy
 ```
