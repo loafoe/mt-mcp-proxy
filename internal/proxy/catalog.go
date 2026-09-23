@@ -57,6 +57,19 @@ func (c *catalog) get(ctx context.Context) ([]rawTool, error) {
 	return tools, nil
 }
 
+// cached returns the catalog's cached tools without triggering a fetch, and
+// whether anything has been cached yet. Used where a fetch would be an
+// unwanted side effect (e.g. computing SEP-2243 param headers for a
+// tools/call that itself never touched tools/list) — the cache is populated
+// by any prior tools/list call, real MCP clients always issue one before a
+// tools/call, so this only misses on a client that skips straight to
+// tools/call on a genuinely cold proxy.
+func (c *catalog) cached() ([]rawTool, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.tools, c.tools != nil
+}
+
 // fetch lists tools from the reference backend. It authenticates with the
 // backend's default credential so backends that gate every request on a
 // credential (e.g. github-mcp-server) still serve the catalog.

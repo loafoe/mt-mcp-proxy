@@ -370,9 +370,37 @@ func (h *Handler) handleToolsCall(w http.ResponseWriter, r *http.Request, req *j
 	forwardReq := jsonRPCRequest{JSONRPC: "2.0", Method: "tools/call", Params: cleanParams, ID: req.ID}
 	forwardBytes, _ := json.Marshal(forwardReq)
 
-	if !h.routeToBackend(w, r, req.ID, tenant, forwardBytes, params.Name) {
+	paramHeaders := h.paramHeadersForCall(params.Name, params.Arguments)
+	if !h.routeToBackend(w, r, req.ID, tenant, forwardBytes, params.Name, paramHeaders) {
 		out.ErrorType = "backend_error"
 	}
+}
+
+// paramHeadersForCall looks up toolName in the cached catalog and, per
+// SEP-2243, projects any "x-mcp-header"-annotated input properties present in
+// args onto the Mcp-Param-* headers a conformant MCP client would have sent.
+// Deliberately reads whatever is already cached (catalog.cached) rather than
+// calling catalog.get: forcing a fetch here would make every tools/call a
+// hidden network call against the reference backend, even one routed to a
+// different backend entirely, and even when the client never called
+// tools/list. Returns nil when nothing is cached yet, the tool is unknown, or
+// it has no annotated properties — the call still proceeds, just without the
+// headers, same as it always has for backends that don't need them.
+func (h *Handler) paramHeadersForCall(toolName string, args json.RawMessage) map[string]string {
+	tools, ok := h.Catalog.cached()
+	if !ok {
+		return nil
+	}
+	for _, t := range tools {
+		var name string
+		if raw, ok := t["name"]; ok {
+			_ = json.Unmarshal(raw, &name)
+		}
+		if name == toolName {
+			return paramHeadersForTool(t, args)
+		}
+	}
+	return nil
 }
 
 // selectTenant picks the tenant for a call. Returns an error message (to be sent
@@ -409,12 +437,17 @@ func (h *Handler) selectTenant(args json.RawMessage, groups []string, authorized
 // Stateless backends (config.ProtocolVersionStateless) skip the client-facing
 // proxySID lookup and the lazily-opened backend session entirely: every
 // request is self-contained, so there is nothing to key a backend session on.
-func (h *Handler) routeToBackend(w http.ResponseWriter, r *http.Request, id json.RawMessage, tenant *registry.Tenant, forwardBytes []byte, toolName string) bool {
+//
+// paramHeaders carries the SEP-2243 Mcp-Param-* projection computed by
+// paramHeadersForCall; it is merged with the tenant's static config headers
+// before every backend call.
+func (h *Handler) routeToBackend(w http.ResponseWriter, r *http.Request, id json.RawMessage, tenant *registry.Tenant, forwardBytes []byte, toolName string, paramHeaders map[string]string) bool {
 	client := h.backendClient(tenant.Backend)
 	cred := tenant.EffectiveCredential()
+	headers := mergeHeaders(tenant.Headers, paramHeaders)
 
 	if tenant.Backend.Stateless() {
-		respBytes, err := client.callTool(r.Context(), "", cred, forwardBytes, tenant.Headers, toolName)
+		respBytes, err := client.callTool(r.Context(), "", cred, forwardBytes, headers, toolName)
 		if err != nil {
 			h.Logger.Error("backend tools/call failed", "backend", tenant.Backend.Name, "err", err)
 			writeRPCError(w, id, -32003, "backend call failed")
@@ -453,7 +486,7 @@ func (h *Handler) routeToBackend(w http.ResponseWriter, r *http.Request, id json
 		h.Sessions.SetBackendSID(proxySID, tenant.ID, backendSID)
 	}
 
-	respBytes, err := client.callTool(r.Context(), backendSID, cred, forwardBytes, tenant.Headers, toolName)
+	respBytes, err := client.callTool(r.Context(), backendSID, cred, forwardBytes, headers, toolName)
 	if err != nil {
 		h.Logger.Error("backend tools/call failed", "backend", tenant.Backend.Name, "err", err)
 		writeRPCError(w, id, -32003, "backend call failed")

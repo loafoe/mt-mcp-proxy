@@ -24,6 +24,17 @@ type fakeBackend struct {
 	sse       bool // answer tools/list as text/event-stream when true
 	stateless bool // emulate the 2026-07-28 stateless revision
 	toolNames []string
+	// toolSchemas overrides the default {"query": string} inputSchema for a
+	// given tool name — used to emulate a tool with SEP-2243 "x-mcp-header"
+	// annotations (e.g. github-mcp-server's owner/repo routing params).
+	toolSchemas map[string]string
+	// enforceParamHeaders, when true, makes tools/call mimic
+	// modelcontextprotocol/go-sdk's real validateParamHeaders check (as
+	// exercised by github-mcp-server >= v1.12.2 once MCP-Protocol-Version >=
+	// 2026-07-28 is present): any tool argument whose schema property is
+	// annotated "x-mcp-header" must have a matching Mcp-Param-* header, or the
+	// call is rejected with a JSON-RPC error instead of "ok".
+	enforceParamHeaders bool
 
 	mu             sync.Mutex
 	sessionsSeen   map[string]int    // backend session id -> request count
@@ -110,10 +121,14 @@ func (fb *fakeBackend) handle(w http.ResponseWriter, r *http.Request) {
 	case "tools/list":
 		tools := make([]rawTool, 0, len(fb.toolNames))
 		for _, n := range fb.toolNames {
+			schema := `{"type":"object","properties":{"query":{"type":"string"}}}`
+			if s, ok := fb.toolSchemas[n]; ok {
+				schema = s
+			}
 			tools = append(tools, rawTool{
 				"name":        json.RawMessage(`"` + n + `"`),
 				"description": json.RawMessage(`"stock tool"`),
-				"inputSchema": json.RawMessage(`{"type":"object","properties":{"query":{"type":"string"}}}`),
+				"inputSchema": json.RawMessage(schema),
 			})
 		}
 		payload, _ := json.Marshal(map[string]any{
@@ -143,12 +158,78 @@ func (fb *fakeBackend) handle(w http.ResponseWriter, r *http.Request) {
 		var p toolCallParams
 		_ = json.Unmarshal(req.Params, &p)
 		fb.lastCallArgs = p.Arguments
+		var schema string
+		if fb.toolSchemas != nil {
+			schema = fb.toolSchemas[p.Name]
+		}
+		headers := map[string]string{}
+		for k := range r.Header {
+			headers[k] = r.Header.Get(k)
+		}
 		fb.mu.Unlock()
+		if fb.enforceParamHeaders {
+			if err := checkParamHeaders(headers, schema, p.Arguments); err != "" {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"jsonrpc": "2.0", "id": req.ID,
+					"error": map[string]any{"code": -32020, "message": err},
+				})
+				return
+			}
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = writeJSONRPCResult(w, req.ID, toolResultText("ok from "+fb.name, false))
 	default:
 		w.WriteHeader(http.StatusAccepted)
 	}
+}
+
+// checkParamHeaders mirrors modelcontextprotocol/go-sdk's real
+// validateParamHeaders (as exercised by github-mcp-server >= v1.12.2) closely
+// enough for tests: for every top-level inputSchema property annotated
+// "x-mcp-header" with a non-null argument, the corresponding Mcp-Param-*
+// header must be present and match. Returns a non-empty error message on any
+// mismatch/absence, "" when the request satisfies every annotation (or the
+// tool has none).
+func checkParamHeaders(headers map[string]string, schemaJSON string, argsJSON json.RawMessage) string {
+	if schemaJSON == "" {
+		return ""
+	}
+	var schema toolInputSchema
+	if err := json.Unmarshal([]byte(schemaJSON), &schema); err != nil {
+		return ""
+	}
+	var args map[string]json.RawMessage
+	if len(argsJSON) > 0 {
+		_ = json.Unmarshal(argsJSON, &args)
+	}
+	for prop, ps := range schema.Properties {
+		if len(ps.XMCPHeader) == 0 {
+			continue
+		}
+		var headerName string
+		if err := json.Unmarshal(ps.XMCPHeader, &headerName); err != nil || headerName == "" {
+			continue
+		}
+		fullHeader := http.CanonicalHeaderKey(paramHeaderPrefix + headerName)
+		argRaw, ok := args[prop]
+		headerVal := headers[fullHeader]
+		if !ok || string(argRaw) == "null" {
+			if headerVal != "" {
+				return fmt.Sprintf("header mismatch: unexpected %s header for absent parameter %q", fullHeader, prop)
+			}
+			continue
+		}
+		if headerVal == "" {
+			return fmt.Sprintf("header mismatch: missing %s header for parameter %q", fullHeader, prop)
+		}
+		encoded, ok := encodeParamHeaderValue(argRaw)
+		if !ok || encoded != headerVal {
+			return fmt.Sprintf("header mismatch: %s header value %q does not match body value", fullHeader, headerVal)
+		}
+	}
+	return ""
 }
 
 func (fb *fakeBackend) sessionCount() int {
