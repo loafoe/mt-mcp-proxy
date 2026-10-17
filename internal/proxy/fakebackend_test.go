@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -35,6 +36,15 @@ type fakeBackend struct {
 	// annotated "x-mcp-header" must have a matching Mcp-Param-* header, or the
 	// call is rejected with a JSON-RPC error instead of "ok".
 	enforceParamHeaders bool
+	// hiddenWhen emulates github-mcp-server's per-request tool filtering
+	// (X-MCP-Readonly / X-MCP-Toolsets): keyed by "Header: value", the listed
+	// tools are left out of tools/list and rejected by tools/call ("unknown
+	// tool") on any request carrying exactly that header value.
+	hiddenWhen map[string][]string
+	// outputSchemas / structured add an MCP outputSchema to a tool and a
+	// structuredContent object to its tools/call result.
+	outputSchemas map[string]string
+	structured    map[string]string
 
 	mu             sync.Mutex
 	sessionsSeen   map[string]int    // backend session id -> request count
@@ -45,6 +55,7 @@ type fakeBackend struct {
 	deletedSID     string            // session id seen on DELETE
 	initCount      int
 	statelessCalls int // requests seen while in stateless mode
+	listCalls      int // tools/list requests seen
 	sawSessionID   bool
 	sawInitialize  bool
 }
@@ -119,17 +130,28 @@ func (fb *fakeBackend) handle(w http.ResponseWriter, r *http.Request) {
 	case "notifications/initialized":
 		w.WriteHeader(http.StatusAccepted)
 	case "tools/list":
+		fb.mu.Lock()
+		fb.listCalls++
+		fb.mu.Unlock()
+		hidden := fb.hiddenFor(r)
 		tools := make([]rawTool, 0, len(fb.toolNames))
 		for _, n := range fb.toolNames {
+			if hidden[n] {
+				continue
+			}
 			schema := `{"type":"object","properties":{"query":{"type":"string"}}}`
 			if s, ok := fb.toolSchemas[n]; ok {
 				schema = s
 			}
-			tools = append(tools, rawTool{
+			tool := rawTool{
 				"name":        json.RawMessage(`"` + n + `"`),
 				"description": json.RawMessage(`"stock tool"`),
 				"inputSchema": json.RawMessage(schema),
-			})
+			}
+			if os, ok := fb.outputSchemas[n]; ok {
+				tool["outputSchema"] = json.RawMessage(os)
+			}
+			tools = append(tools, tool)
 		}
 		payload, _ := json.Marshal(map[string]any{
 			"jsonrpc": "2.0",
@@ -167,6 +189,15 @@ func (fb *fakeBackend) handle(w http.ResponseWriter, r *http.Request) {
 			headers[k] = r.Header.Get(k)
 		}
 		fb.mu.Unlock()
+		if fb.hiddenFor(r)[p.Name] {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"jsonrpc": "2.0", "id": req.ID,
+				"error": map[string]any{"code": -32602, "message": fmt.Sprintf("unknown tool %q", p.Name)},
+			})
+			return
+		}
 		if fb.enforceParamHeaders {
 			if err := checkParamHeaders(headers, schema, p.Arguments); err != "" {
 				w.Header().Set("Content-Type", "application/json")
@@ -179,7 +210,11 @@ func (fb *fakeBackend) handle(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = writeJSONRPCResult(w, req.ID, toolResultText("ok from "+fb.name, false))
+		result := toolResultText("ok from "+fb.name, false)
+		if sc, ok := fb.structured[p.Name]; ok {
+			result["structuredContent"] = json.RawMessage(sc)
+		}
+		_ = writeJSONRPCResult(w, req.ID, result)
 	default:
 		w.WriteHeader(http.StatusAccepted)
 	}
@@ -230,6 +265,35 @@ func checkParamHeaders(headers map[string]string, schemaJSON string, argsJSON js
 		}
 	}
 	return ""
+}
+
+// hiddenFor returns the tools hiddenWhen hides for this request's headers.
+func (fb *fakeBackend) hiddenFor(r *http.Request) map[string]bool {
+	hidden := map[string]bool{}
+	for match, tools := range fb.hiddenWhen {
+		name, value, _ := strings.Cut(match, ": ")
+		if r.Header.Get(name) == value {
+			for _, t := range tools {
+				hidden[t] = true
+			}
+		}
+	}
+	return hidden
+}
+
+// toolsListCount returns the number of tools/list requests handled.
+func (fb *fakeBackend) toolsListCount() int {
+	fb.mu.Lock()
+	defer fb.mu.Unlock()
+	return fb.listCalls
+}
+
+// lastToolCallAuth returns the Authorization header of the last tools/call
+// that reached this backend ("" when none has).
+func (fb *fakeBackend) lastToolCallAuth() string {
+	fb.mu.Lock()
+	defer fb.mu.Unlock()
+	return fb.lastAuth
 }
 
 func (fb *fakeBackend) sessionCount() int {

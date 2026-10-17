@@ -155,7 +155,7 @@ func (c *backendClient) notifyInitialized(ctx context.Context, sessionID, creden
 
 // listTools fetches the backend's tool catalog. In stateless mode there is no
 // prior initialize/session, so the request carries client identity in "_meta".
-func (c *backendClient) listTools(ctx context.Context, sessionID, credential string) ([]rawTool, error) {
+func (c *backendClient) listTools(ctx context.Context, sessionID, credential string, headers map[string]string) ([]rawTool, error) {
 	req := jsonRPCRequest{
 		JSONRPC: "2.0",
 		Method:  "tools/list",
@@ -165,7 +165,7 @@ func (c *backendClient) listTools(ctx context.Context, sessionID, credential str
 		req.Params = injectMeta(nil)
 	}
 	payload, _ := json.Marshal(req)
-	body, _, err := c.post(ctx, payload, sessionID, credential, nil, "tools/list", "")
+	body, _, err := c.post(ctx, payload, sessionID, credential, headers, "tools/list", "")
 	if err != nil {
 		return nil, err
 	}

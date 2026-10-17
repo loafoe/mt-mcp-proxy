@@ -80,7 +80,7 @@ func run(configPath string, logger *slog.Logger) error {
 	}()
 
 	store := session.NewStore(30 * time.Minute)
-	cat := proxy.NewCatalog(reg.ReferenceBackend(), reg.ReferenceCredential(), 5*time.Minute)
+	cat := proxy.NewCatalogs(reg, 5*time.Minute, logger)
 	h := proxy.NewHandler(verifier, reg, store, cat, logger, obs, cfg.Server, cfg.Auth)
 
 	warmCatalog(ctx, h, logger)

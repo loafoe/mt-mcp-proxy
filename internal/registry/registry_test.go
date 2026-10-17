@@ -74,13 +74,6 @@ func TestIsAuthorized(t *testing.T) {
 	}
 }
 
-func TestReferenceBackendIsFirst(t *testing.T) {
-	r, _ := New(testBackends())
-	if r.ReferenceBackend().Name != "grafana-ab" {
-		t.Errorf("reference backend should be the first, got %q", r.ReferenceBackend().Name)
-	}
-}
-
 func TestNewRejectsDuplicateTenant(t *testing.T) {
 	_, err := New([]config.BackendConfig{
 		{Name: "a", URL: "http://a/mcp", Tenants: []config.TenantConfig{{ID: "x", Groups: []string{"g"}}}},
@@ -106,41 +99,6 @@ func TestTwoTenantsSameBackend(t *testing.T) {
 	b, _ := r.ResolveTenant("team-b")
 	if a.Backend != b.Backend {
 		t.Error("team-a and team-b should resolve to the same backend instance")
-	}
-}
-
-// ReferenceCredential falls back to the reference backend's first tenant when
-// the backend has no default credential (per-tenant-only creds, e.g. github
-// PATs). Without this the catalog fetch would 401 on backends that gate every
-// request on a credential.
-func TestReferenceCredentialFallsBackToFirstTenant(t *testing.T) {
-	r, err := New([]config.BackendConfig{
-		{Name: "github", URL: "http://gh:8082/", Tenants: []config.TenantConfig{
-			{ID: "team-platform", Groups: []string{"platform-eng"}, Credential: "ghp_platform"},
-			{ID: "team-data", Groups: []string{"data-eng"}, Credential: "ghp_data"},
-		}},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := r.ReferenceCredential(); got != "ghp_platform" {
-		t.Errorf("expected first tenant credential ghp_platform, got %q", got)
-	}
-}
-
-// A backend-level default credential takes precedence over tenant credentials
-// for the catalog fetch.
-func TestReferenceCredentialPrefersBackendDefault(t *testing.T) {
-	r, err := New([]config.BackendConfig{
-		{Name: "grafana", URL: "http://g:8000/mcp", Credential: "backend-sa", Tenants: []config.TenantConfig{
-			{ID: "team-a", Groups: []string{"team-a"}, Credential: "tenant-a"},
-		}},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := r.ReferenceCredential(); got != "backend-sa" {
-		t.Errorf("expected backend default backend-sa, got %q", got)
 	}
 }
 

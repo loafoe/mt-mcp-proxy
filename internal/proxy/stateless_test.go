@@ -9,7 +9,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/loafoe/mt-mcp-proxy/internal/config"
 	"github.com/loafoe/mt-mcp-proxy/internal/registry"
@@ -144,9 +143,9 @@ func TestCatalogFetchStatelessBackendSkipsInitialize(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cat := NewCatalog(reg.ReferenceBackend(), reg.ReferenceCredential(), time.Minute)
+	cat := newTestCatalogs(t, reg)
 
-	tools, err := cat.get(context.Background())
+	tools, err := cat.forTenant("grafana-stateless-team").get(context.Background())
 	if err != nil {
 		t.Fatalf("catalog fetch: %v", err)
 	}

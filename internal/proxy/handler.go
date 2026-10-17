@@ -37,7 +37,7 @@ type Handler struct {
 	Verifier auth.Verifier
 	Registry *registry.Registry
 	Sessions *session.Store
-	Catalog  *catalog
+	Catalog  *Catalogs
 	Logger   *slog.Logger
 	// Obs records metrics and traces. Nil-safe: all recording is skipped when nil.
 	Obs *observability.Observability
@@ -50,7 +50,7 @@ type Handler struct {
 }
 
 // NewHandler wires a Handler with sane defaults.
-func NewHandler(v auth.Verifier, reg *registry.Registry, store *session.Store, cat *catalog, logger *slog.Logger, obs *observability.Observability, serverCfg config.ServerConfig, authCfg config.AuthConfig) *Handler {
+func NewHandler(v auth.Verifier, reg *registry.Registry, store *session.Store, cat *Catalogs, logger *slog.Logger, obs *observability.Observability, serverCfg config.ServerConfig, authCfg config.AuthConfig) *Handler {
 	return &Handler{
 		Verifier:  v,
 		Registry:  reg,
@@ -229,44 +229,64 @@ func (h *Handler) handleDiscover(w http.ResponseWriter, req *jsonRPCRequest) {
 	_ = writeJSONRPCResult(w, req.ID, h.discoverResult())
 }
 
-// handleToolsList serves the cached catalog with the identity-hybrid transform.
+// handleToolsList serves the union of the caller's tenants' catalogs. Each
+// tenant's catalog is what the backend lists for that tenant's credential and
+// headers, so a caller only sees tools at least one of their tenants can run.
+//
+// Tenant selector, per tool:
+//   - one authorized tenant: clean passthrough, no selector;
+//   - several: an enum of just the tenants that have the tool — required when
+//     more than one has it, optional when only one does (tools/call then picks
+//     it automatically);
+//   - no/invalid JWT (discovery): every tenant's tools with an optional
+//     free-form selector.
 func (h *Handler) handleToolsList(w http.ResponseWriter, r *http.Request, req *jsonRPCRequest) {
-	tools, err := h.Catalog.get(r.Context())
+	var authorized []*registry.Tenant
+	if groups, err := h.Verifier.Groups(r); err == nil {
+		authorized = h.Registry.AuthorizedTenants(groups)
+	}
+	discovery := len(authorized) == 0
+	tenants := authorized
+	if discovery {
+		tenants = h.Registry.Tenants()
+		sort.Slice(tenants, func(i, j int) bool { return tenants[i].ID < tenants[j].ID })
+	}
+
+	views, err := h.Catalog.toolsFor(r.Context(), tenants)
 	if err != nil {
 		h.Logger.Error("catalog fetch failed", "err", err)
 		writeRPCError(w, req.ID, -32603, "failed to load tool catalog")
 		return
 	}
 
-	// Copy the catalog so per-caller mutation does not corrupt the cache.
-	out := make([]rawTool, 0, len(tools)+1)
-	for _, t := range tools {
-		out = append(out, cloneTool(t))
-	}
-
-	// Determine the caller's authorized tenants (JWT optional on discovery).
-	var tenantIDs []string
-	if groups, err := h.Verifier.Groups(r); err == nil {
-		for _, t := range h.Registry.AuthorizedTenants(groups) {
-			tenantIDs = append(tenantIDs, t.ID)
+	// Union by tool name, in first-seen order; the first tenant's definition
+	// wins when two tenants describe the same tool differently.
+	var order []string
+	defs := map[string]rawTool{}
+	having := map[string][]string{}
+	for _, v := range views {
+		for _, t := range v.tools {
+			name := toolName(t)
+			if _, seen := defs[name]; !seen {
+				order = append(order, name)
+				defs[name] = t
+			}
+			having[name] = append(having[name], v.tenant.ID)
 		}
 	}
 
-	switch {
-	case len(tenantIDs) >= 2:
-		// Multi-tenant caller: inject a required enum selector.
-		schema := tenantSchema(tenantIDs, true)
-		for _, t := range out {
-			injectTenantArg(t, schema, true)
+	// Copy each tool so per-caller mutation does not corrupt the cache.
+	out := make([]rawTool, 0, len(order)+1)
+	for _, name := range order {
+		t := cloneTool(defs[name])
+		switch {
+		case discovery:
+			injectTenantArg(t, tenantSchema(nil, false), false)
+		case len(authorized) >= 2:
+			ids := having[name]
+			injectTenantArg(t, tenantSchema(ids, len(ids) >= 2), len(ids) >= 2)
 		}
-	case len(tenantIDs) == 1:
-		// Single authorized tenant: clean passthrough, no selector.
-	default:
-		// No/invalid JWT (discovery): optional free-form selector.
-		schema := tenantSchema(nil, false)
-		for _, t := range out {
-			injectTenantArg(t, schema, false)
-		}
+		out = append(out, t)
 	}
 
 	out = append(out, listInstancesToolDef())
@@ -347,7 +367,7 @@ func (h *Handler) handleToolsCall(w http.ResponseWriter, r *http.Request, req *j
 	}
 
 	// Resolve the target tenant.
-	tenant, errResult := h.selectTenant(params.Arguments, groups, authorized)
+	tenant, errResult := h.selectTenant(params.Name, params.Arguments, groups, authorized)
 	if errResult != "" {
 		out.ErrorType = "tenant_selection"
 		w.Header().Set("Content-Type", "application/json")
@@ -371,7 +391,7 @@ func (h *Handler) handleToolsCall(w http.ResponseWriter, r *http.Request, req *j
 	forwardReq := jsonRPCRequest{JSONRPC: "2.0", Method: "tools/call", Params: cleanParams, ID: req.ID}
 	forwardBytes, _ := json.Marshal(forwardReq)
 
-	paramHeaders := h.paramHeadersForCall(params.Name, params.Arguments)
+	paramHeaders := h.paramHeadersForCall(tenant, params.Name, params.Arguments)
 	if !h.routeToBackend(w, r, req.ID, tenant, forwardBytes, params.Name, paramHeaders) {
 		out.ErrorType = "backend_error"
 	}
@@ -392,40 +412,33 @@ func (h *Handler) handleToolsCall(w http.ResponseWriter, r *http.Request, req *j
 // succeeds — the catalog's own TTL/staleness handling takes over after the
 // first successful fetch.
 func (h *Handler) WarmCatalog(ctx context.Context) error {
-	_, err := h.Catalog.get(ctx)
-	return err
+	return h.Catalog.warm(ctx)
 }
 
-// paramHeadersForCall looks up toolName in the cached catalog and, per
-// SEP-2243, projects any "x-mcp-header"-annotated input properties present in
-// args onto the Mcp-Param-* headers a conformant MCP client would have sent.
-// Deliberately reads whatever is already cached (catalog.cached) rather than
-// calling catalog.get: forcing a fetch here would make every tools/call a
-// hidden network call against the reference backend, even one routed to a
-// different backend entirely, and even when the client never called
-// tools/list. Returns nil when nothing is cached yet, the tool is unknown, or
-// it has no annotated properties — the call still proceeds, just without the
-// headers, same as it always has for backends that don't need them.
-func (h *Handler) paramHeadersForCall(toolName string, args json.RawMessage) map[string]string {
-	tools, ok := h.Catalog.cached()
-	if !ok {
+// paramHeadersForCall looks up toolName in the selected tenant's cached
+// catalog and, per SEP-2243, projects any "x-mcp-header"-annotated input
+// properties present in args onto the Mcp-Param-* headers a conformant MCP
+// client would have sent. Deliberately reads whatever is already cached rather
+// than fetching: forcing a fetch here would make every tools/call a hidden
+// network call, even when the client never called tools/list. Returns nil
+// when nothing is cached yet, the tool is unknown, or it has no annotated
+// properties — the call still proceeds, just without the headers, same as it
+// always has for backends that don't need them.
+func (h *Handler) paramHeadersForCall(tenant *registry.Tenant, toolName string, args json.RawMessage) map[string]string {
+	tool, found, _ := h.Catalog.cachedTool(tenant.ID, toolName)
+	if !found {
 		return nil
 	}
-	for _, t := range tools {
-		var name string
-		if raw, ok := t["name"]; ok {
-			_ = json.Unmarshal(raw, &name)
-		}
-		if name == toolName {
-			return paramHeadersForTool(t, args)
-		}
-	}
-	return nil
+	return paramHeadersForTool(tool, args)
 }
 
-// selectTenant picks the tenant for a call. Returns an error message (to be sent
-// as an isError tool result) or a tenant.
-func (h *Handler) selectTenant(args json.RawMessage, groups []string, authorized []*registry.Tenant) (*registry.Tenant, string) {
+// selectTenant picks the tenant for a call to toolName. Returns an error
+// message (to be sent as an isError tool result) or a tenant.
+//
+// Tool availability comes from each tenant's cached catalog. A tenant whose
+// catalog has not been fetched yet counts as "may have it", so a cold cache
+// never blocks a call the backend would have accepted.
+func (h *Handler) selectTenant(toolName string, args json.RawMessage, groups []string, authorized []*registry.Tenant) (*registry.Tenant, string) {
 	explicit := extractTenantArg(args)
 
 	if explicit != "" {
@@ -436,6 +449,9 @@ func (h *Handler) selectTenant(args json.RawMessage, groups []string, authorized
 		if !registry.IsAuthorized(tenant, groups) {
 			return nil, fmt.Sprintf("not authorized for tenant %q; choose one of: %s", explicit, tenantList(authorized))
 		}
+		if msg := h.unavailable(toolName, tenant, authorized); msg != "" {
+			return nil, msg
+		}
 		return tenant, ""
 	}
 
@@ -443,10 +459,52 @@ func (h *Handler) selectTenant(args json.RawMessage, groups []string, authorized
 	case 0:
 		return nil, "no instances are authorized for your token"
 	case 1:
+		if msg := h.unavailable(toolName, authorized[0], authorized); msg != "" {
+			return nil, msg
+		}
 		return authorized[0], ""
-	default:
-		return nil, fmt.Sprintf("multiple instances available; pass the %q argument, one of: %s", tenantArg, tenantList(authorized))
 	}
+
+	candidates := h.tenantsWithTool(toolName, authorized)
+	switch len(candidates) {
+	case 0:
+		return nil, fmt.Sprintf("tool %q is not available on any of your instances: %s", toolName, tenantList(authorized))
+	case 1:
+		return candidates[0], ""
+	default:
+		return nil, fmt.Sprintf("multiple instances available; pass the %q argument, one of: %s", tenantArg, tenantList(candidates))
+	}
+}
+
+// tenantsWithTool returns the tenants among candidates that have (or, with a
+// cold catalog, may have) toolName.
+func (h *Handler) tenantsWithTool(toolName string, candidates []*registry.Tenant) []*registry.Tenant {
+	var out []*registry.Tenant
+	for _, t := range candidates {
+		if _, found, known := h.Catalog.cachedTool(t.ID, toolName); found || !known {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// unavailable returns an error message when tenant's cached catalog is known
+// not to contain toolName, naming the caller's tenants that do have it.
+func (h *Handler) unavailable(toolName string, tenant *registry.Tenant, authorized []*registry.Tenant) string {
+	if _, found, known := h.Catalog.cachedTool(tenant.ID, toolName); found || !known {
+		return ""
+	}
+	msg := fmt.Sprintf("tool %q is not available for tenant %q", toolName, tenant.ID)
+	var others []*registry.Tenant
+	for _, t := range h.tenantsWithTool(toolName, authorized) {
+		if t.ID != tenant.ID {
+			others = append(others, t)
+		}
+	}
+	if len(others) > 0 {
+		msg += "; it is available on: " + tenantList(others)
+	}
+	return msg
 }
 
 // routeToBackend forwards a prepared tools/call to the tenant's backend,

@@ -116,9 +116,9 @@ session initialized with one tenant's credential.
 ## Sessions
 
 The proxy owns the MCP session. It answers `initialize` itself and mints its own
-`Mcp-Session-Id`; it serves `tools/list` from a cached reference catalog; and per
-tool call it lazily opens/reuses a backend MCP session for the selected tenant,
-mapping the client session to backend sessions internally.
+`Mcp-Session-Id`; it serves `tools/list` from cached per-tenant catalogs (see
+below); and per tool call it lazily opens/reuses a backend MCP session for the
+selected tenant, mapping the client session to backend sessions internally.
 
 Because the session map is in-memory:
 
@@ -126,6 +126,44 @@ Because the session map is in-memory:
   `Mcp-Session-Id`.
 - **Restart:** sessions are dropped; the client re-runs `initialize`.
 - `DELETE` on the endpoint tears down the client session and its backend sessions.
+
+## Per-tenant tool catalogs
+
+A backend may expose different tools to different tenants — github-mcp-server,
+for example, narrows each request's tool set by its headers (`X-MCP-Readonly`,
+`X-MCP-Toolsets`) and PAT. So the proxy caches **one catalog per tenant**,
+fetched with that tenant's credential and headers (tenants that see a backend
+identically — same backend, credential and headers — share one fetch):
+
+- `tools/list` returns the union of the caller's tenants' tools. For a caller
+  with several tenants, each tool's `tenant` selector lists only the tenants
+  that have it: required when more than one does, optional when only one does.
+- `tools/call` without `tenant` routes to the only authorized tenant that has
+  the tool; naming a tenant that lacks it returns an error that says where the
+  tool is available, without calling the backend.
+- A tenant whose catalog cannot be fetched is left out of `tools/list` (logged);
+  the call fails only when none of the caller's tenants is available.
+
+Tool definitions and results are otherwise passed through untouched, including
+structured output (`outputSchema`, `structuredContent`).
+
+This lets one deployment serve, say, a read-only and a write-enabled tenant
+from the same github-mcp-server, each with its own PAT:
+
+```yaml
+backends:
+  - name: github
+    url: http://github-mcp-server:8082/
+    tenants:
+      - id: org-readonly
+        groups: [everyone]
+        credential: "${GITHUB_PAT_READONLY}"
+        headers: { X-MCP-Readonly: "true" }
+      - id: iac-prs
+        groups: [iac-team]
+        credential: "${GITHUB_PAT_IAC}"
+        headers: { X-MCP-Toolsets: "default" }
+```
 
 ## Stateless backends (spec 2026-07-28)
 
