@@ -1,7 +1,7 @@
 # Build the proxy binary and run it on a minimal static base.
 # The release pipeline uses ko (see .ko.yaml); this Dockerfile exists for local
 # `docker compose` and anyone who prefers a plain build.
-FROM golang:1.26 AS build
+FROM golang:1.27 AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
