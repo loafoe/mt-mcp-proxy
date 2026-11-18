@@ -1,0 +1,84 @@
+name: Renovate
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/renovate.yaml'
+      - '.github/renovate-config.js'
+      - 'renovate.json'
+  schedule:
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+    inputs:
+      logLevel:
+        description: 'Renovate log level'
+        type: choice
+        options: [info, debug]
+        default: info
+
+# Two runs at once fight over the same branches, and one of them aborts with
+# "repository has changed during renovation". Let a second run wait instead.
+concurrency:
+  group: renovate
+  cancel-in-progress: false
+
+env:
+  # Managed by the customManagers entry for it in renovate.json.
+  RENOVATE_VERSION: 44.252.6
+
+jobs:
+  # A malformed renovate.json only shows up the next time the schedule fires,
+  # so validate it on the pull request that changes it, against the same
+  # Renovate version the scheduled run uses.
+  validate:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Validate configuration
+        run: npx --yes --package renovate@${{ env.RENOVATE_VERSION }} renovate-config-validator renovate.json
+
+  renovate:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+      # Needed if minimumReleaseAge is ever turned on: Renovate parks a new
+      # branch behind a "Pending" commit status while it waits, and a failure
+      # to set that status aborts the whole run.
+      statuses: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Self-hosted Renovate
+        uses: renovatebot/github-action@v46.3.14
+        with:
+          renovate-version: ${{ env.RENOVATE_VERSION }}
+          # RENOVATE_TOKEN is strongly preferred over GITHUB_TOKEN: PRs opened
+          # with GITHUB_TOKEN don't trigger other workflows, and GitHub rejects
+          # any push that edits .github/workflows/* unless the pushing token
+          # may write workflows - a permission GITHUB_TOKEN cannot be granted.
+          # A fine-grained PAT needs contents, issues, pull requests, commit
+          # statuses and workflows, all read and write. A GitHub App token
+          # works too and is less long-lived.
+          token: ${{ secrets.RENOVATE_TOKEN || secrets.GITHUB_TOKEN }}
+          configurationFile: '.github/renovate-config.js'
+        env:
+          RENOVATE_REPOSITORIES: ${{ github.repository }}
+          LOG_LEVEL: ${{ inputs.logLevel || 'info' }}

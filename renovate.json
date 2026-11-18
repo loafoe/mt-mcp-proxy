@@ -10,6 +10,16 @@
   "postUpdateOptions": [
     "gomodTidy"
   ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Renovate itself, as pinned by the self-hosted workflow.",
+      "managerFilePatterns": ["/^\\.github/workflows/renovate\\.ya?ml$/"],
+      "matchStrings": ["RENOVATE_VERSION:\\s*(?<currentValue>[^\\s#]+)"],
+      "depNameTemplate": "renovate",
+      "datasourceTemplate": "npm"
+    }
+  ],
   "packageRules": [
     {
       "matchManagers": ["gomod"],
