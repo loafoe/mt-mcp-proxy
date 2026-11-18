@@ -23,7 +23,6 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  # Managed by the customManagers entry for it in renovate.json.
   RENOVATE_VERSION: 44.252.6
 
 jobs:
@@ -70,14 +69,12 @@ jobs:
         uses: renovatebot/github-action@v46.3.14
         with:
           renovate-version: ${{ env.RENOVATE_VERSION }}
-          # RENOVATE_TOKEN is strongly preferred over GITHUB_TOKEN: PRs opened
-          # with GITHUB_TOKEN don't trigger other workflows, and GitHub rejects
-          # any push that edits .github/workflows/* unless the pushing token
-          # may write workflows - a permission GITHUB_TOKEN cannot be granted.
-          # A fine-grained PAT needs contents, issues, pull requests, commit
-          # statuses and workflows, all read and write. A GitHub App token
-          # works too and is less long-lived.
-          token: ${{ secrets.RENOVATE_TOKEN || secrets.GITHUB_TOKEN }}
+          # GITHUB_TOKEN only: it can't write .github/workflows/* and PRs it
+          # opens don't trigger other workflows, so Go module and Docker
+          # update PRs won't get the ci.yaml check automatically. Actions
+          # updates are handled by Dependabot instead, whose PRs use its own
+          # identity and do trigger CI.
+          token: ${{ secrets.GITHUB_TOKEN }}
           configurationFile: '.github/renovate-config.js'
         env:
           RENOVATE_REPOSITORIES: ${{ github.repository }}
