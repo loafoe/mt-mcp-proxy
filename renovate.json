@@ -1,0 +1,28 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended"
+  ],
+  "dependencyDashboard": true,
+  "prConcurrentLimit": 3,
+  "prHourlyLimit": 2,
+  "automerge": false,
+  "postUpdateOptions": [
+    "gomodTidy"
+  ],
+  "packageRules": [
+    {
+      "matchManagers": ["gomod"],
+      "matchPackageNames": ["go.opentelemetry.io/**"],
+      "groupName": "OpenTelemetry"
+    },
+    {
+      "matchManagers": ["github-actions"],
+      "groupName": "GitHub Actions"
+    },
+    {
+      "matchManagers": ["dockerfile"],
+      "groupName": "Docker base images"
+    }
+  ]
+}
