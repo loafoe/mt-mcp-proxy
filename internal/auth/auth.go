@@ -29,6 +29,11 @@ var ErrUnauthorized = errors.New("unauthorized")
 // ErrInsufficientScope indicates the token is valid but lacks the required scopes.
 var ErrInsufficientScope = errors.New("insufficient_scope")
 
+// asymmetricAlgs is the allow-listed signing-algorithm family for any
+// public-key-based verifier (static PEM or JWKS) — never HMAC, since those
+// modes never hold a shared secret.
+var asymmetricAlgs = []string{"RS256", "RS384", "RS512", "ES256", "ES384", "ES512", "PS256", "PS384", "PS512"}
+
 // Verifier validates an HTTP request and returns the verified groups.
 type Verifier interface {
 	// Groups verifies the request's bearer token and returns its groups.
@@ -70,9 +75,18 @@ func New(ctx context.Context, c config.AuthConfig) (Verifier, error) {
 			return nil, fmt.Errorf("init jwks: %w", err)
 		}
 		return &jwtVerifier{
-			claimReader:     base,
-			keyfunc:         jwks.Keyfunc,
-			parserOpts:      parserOpts(c),
+			claimReader: base,
+			keyfunc:     jwks.Keyfunc,
+			parserOpts:  parserOpts(c),
+			// Explicit allow-list, defense-in-depth: a JWKS keyfunc returns a
+			// typed key (e.g. *rsa.PublicKey), which golang-jwt/jwt's HMAC
+			// Verify already rejects via a failed []byte type assertion, and
+			// keyfunc itself cross-checks the token's alg against the JWK's
+			// own declared "alg" when the JWKS publishes one - but neither
+			// of those is this package's own control, and a symmetric key
+			// ever appearing in an issuer's JWKS would defeat both. Pinning
+			// the asymmetric family here doesn't depend on either.
+			validAlgs:       asymmetricAlgs,
 			scopesSupported: c.ScopesSupported,
 			audiences:       acceptedAudiences(c),
 		}, nil
@@ -195,7 +209,7 @@ func loadStaticKey(c config.AuthConfig) (any, []string, error) {
 		return nil, nil, fmt.Errorf("parse public key: %w", err)
 	}
 	// Accept the common asymmetric families; jwt enforces the actual match.
-	return key, []string{"RS256", "RS384", "RS512", "ES256", "ES384", "ES512", "PS256", "PS384", "PS512"}, nil
+	return key, asymmetricAlgs, nil
 }
 
 // jwtVerifier verifies signatures via a keyfunc (static key or JWKS).

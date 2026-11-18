@@ -374,6 +374,18 @@ func TestJWKSModeWithDiscovery(t *testing.T) {
 
 // rsaJWKS renders a minimal single-key JWKS document for an RSA public key.
 func rsaJWKS(key *rsa.PrivateKey, kid string) string {
+	return rsaJWKSWithAlg(key, kid, `"alg":"RS256",`)
+}
+
+// rsaJWKSNoAlg renders a JWKS entry with no "alg" field — legal per RFC 7517
+// (OPTIONAL), used to isolate this package's own validAlgs enforcement from
+// keyfunc's own (separate) alg-vs-JWK cross-check, which only runs when the
+// JWK happens to declare "alg".
+func rsaJWKSNoAlg(key *rsa.PrivateKey, kid string) string {
+	return rsaJWKSWithAlg(key, kid, "")
+}
+
+func rsaJWKSWithAlg(key *rsa.PrivateKey, kid, algField string) string {
 	n := base64.RawURLEncoding.EncodeToString(key.PublicKey.N.Bytes())
 	eb := make([]byte, 4)
 	binary.BigEndian.PutUint32(eb, uint32(key.PublicKey.E))
@@ -383,5 +395,88 @@ func rsaJWKS(key *rsa.PrivateKey, kid string) string {
 		i++
 	}
 	e := base64.RawURLEncoding.EncodeToString(eb[i:])
-	return `{"keys":[{"kty":"RSA","use":"sig","alg":"RS256","kid":"` + kid + `","n":"` + n + `","e":"` + e + `"}]}`
+	return `{"keys":[{"kty":"RSA","use":"sig",` + algField + `"kid":"` + kid + `","n":"` + n + `","e":"` + e + `"}]}`
+}
+
+// TestJWKSModeSetsValidAlgs locks in that New() wires an explicit algorithm
+// allow-list for AuthModeJWKS, not just AuthModeStatic. Without this, the
+// JWT parser accepts any algorithm the token header claims (defense-in-depth
+// gap — see auth.go's comment on asymmetricAlgs for why this isn't currently
+// exploitable against Dex specifically, but shouldn't rely on that).
+func TestJWKSModeSetsValidAlgs(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(rsaJWKS(key, "k1")))
+	}))
+	t.Cleanup(srv.Close)
+
+	v, err := New(context.Background(), config.AuthConfig{
+		Mode:        config.AuthModeJWKS,
+		GroupsClaim: "groups",
+		JWKSURL:     srv.URL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	jv, ok := v.(*jwtVerifier)
+	if !ok {
+		t.Fatalf("New returned %T, want *jwtVerifier", v)
+	}
+	if len(jv.validAlgs) == 0 {
+		t.Fatal("validAlgs is empty for AuthModeJWKS - jwt.WithValidMethods will never be applied")
+	}
+	for _, bad := range []string{"HS256", "none"} {
+		for _, a := range jv.validAlgs {
+			if a == bad {
+				t.Errorf("validAlgs must not include %q", bad)
+			}
+		}
+	}
+}
+
+// TestJWKSModeRejectsAlgConfusionWhenJWKHasNoAlg simulates the classic
+// RS256->HS256 key-confusion attack: a token claiming alg:HS256, "signed"
+// using the RSA public key's raw modulus bytes as if they were an HMAC
+// secret (what an attacker who only knows the public JWKS can compute).
+// The JWKS here deliberately omits "alg" on the JWK (legal per RFC 7517) so
+// keyfunc's own alg-vs-JWK cross-check - a second, independent defense this
+// package doesn't control - can't be the thing that saves this test; only
+// this package's own validAlgs allow-list is exercised.
+func TestJWKSModeRejectsAlgConfusionWhenJWKHasNoAlg(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(rsaJWKSNoAlg(key, "k1")))
+	}))
+	t.Cleanup(srv.Close)
+
+	v, err := New(context.Background(), config.AuthConfig{
+		Mode:        config.AuthModeJWKS,
+		GroupsClaim: "groups",
+		JWKSURL:     srv.URL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	forged := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
+		"exp":    time.Now().Add(time.Hour).Unix(),
+		"groups": []string{"forged-admin"},
+	})
+	forged.Header["kid"] = "k1"
+	signed, err := forged.SignedString(key.PublicKey.N.Bytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := v.Groups(reqWith(signed)); !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("forged alg-confusion token should be rejected as unauthorized, got %v", err)
+	}
 }
