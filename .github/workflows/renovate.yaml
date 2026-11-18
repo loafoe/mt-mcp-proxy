@@ -7,7 +7,7 @@ on:
       - '.github/renovate-config.js'
       - 'renovate.json'
   schedule:
-    - cron: '0 0 * * *'
+    - cron: '43 0 * * *'
   workflow_dispatch:
     inputs:
       logLevel:
